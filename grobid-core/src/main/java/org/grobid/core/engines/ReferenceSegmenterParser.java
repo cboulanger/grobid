@@ -453,6 +453,9 @@ System.out.println(featureVectorPiece.size());
 				else {
 					output = writeField(label, lastTag, tok, "<other>", "", addSpace, addEOL, 2);
 					if (output != null) {
+                        if (refOpen) {
+                            sb.append("</bibl>");
+                        }
 						sb.append(output);
 						refOpen = false;
 					}
