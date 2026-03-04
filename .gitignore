@@ -89,3 +89,8 @@ Dockerfile.dataseer
 Dockerfile.software
 Dockerfile.datastet
 .run
+
+# Nix flake: local Python venv created by flake.nix shellHook
+.venv
+# Nix flake lock — commit this for reproducible environments
+# flake.lock
