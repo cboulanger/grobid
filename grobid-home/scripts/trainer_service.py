@@ -18,6 +18,11 @@ Endpoints:
     GET  /jobs/{job_id}         Job status + full log
     GET  /jobs/{job_id}/stream  Live log via SSE
     GET  /jobs                  List all jobs
+    GET  /flavors               Flavors per model (from dataset dirs)
+    POST /upload/{model}        Upload ZIP of training data (non-destructive)
+    GET  /uploads               List upload batches
+    GET  /uploads/{batch_id}    Get upload batch details
+    POST /revert/{batch_id}     Revert an upload batch
     GET  /health                Environment info
 
 Notes on evaluation:
@@ -29,17 +34,22 @@ Notes on evaluation:
 
 import argparse
 import glob
+import io
+import json
 import os
 import platform
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import uvicorn
@@ -400,6 +410,211 @@ def list_jobs():
             }
             for j in _jobs.values()
         ]
+
+
+def _discover_flavors() -> Dict[str, List[str]]:
+    """
+    Walk grobid-trainer/resources/dataset/ and detect flavors.
+
+    A directory is a flavor when one of its ancestors (within the dataset root)
+    also contains a 'corpus' subdirectory — i.e. it extends an existing model
+    rather than defining a new one.  Sub-model roots like name/citation or
+    patent/citation are excluded because their parent dirs have no corpus.
+    """
+    dataset_dir = GROBID_ROOT / "grobid-trainer" / "resources" / "dataset"
+    if not dataset_dir.exists():
+        return {}
+
+    result: Dict[str, List[str]] = {}
+
+    for corpus_path in sorted(dataset_dir.rglob("corpus")):
+        if not corpus_path.is_dir():
+            continue
+        candidate = corpus_path.parent          # the potential flavor/model dir
+        rel_parts  = candidate.relative_to(dataset_dir).parts
+
+        # Walk ancestors from the dataset root inward; stop at first with corpus.
+        model_root: Optional[Path] = None
+        for depth in range(len(rel_parts) - 1):
+            ancestor = dataset_dir.joinpath(*rel_parts[: depth + 1])
+            if (ancestor / "corpus").is_dir():
+                model_root = ancestor
+                break
+
+        if model_root is not None:
+            model_key  = str(model_root.relative_to(dataset_dir))
+            flavor_str = str(candidate.relative_to(model_root))
+            result.setdefault(model_key, []).append(flavor_str)
+
+    return result
+
+
+@app.get("/flavors", summary="List dataset flavors per model")
+def list_flavors():
+    """
+    Return the flavors (dataset variants) that exist on disk for each model.
+
+    A flavor is a subdirectory of a model's dataset directory that itself
+    contains a corpus — e.g. header/article/light or segmentation/sdo/ietf.
+    Sub-model paths such as name/citation are excluded.
+    """
+    return _discover_flavors()
+
+
+# ── Upload registry ────────────────────────────────────────────────────────────
+
+UPLOADS_DIR = GROBID_ROOT / "grobid-trainer" / "resources" / "uploads"
+DATASET_DIR = GROBID_ROOT / "grobid-trainer" / "resources" / "dataset"
+
+
+def _corpus_dir(model: str, flavor: str) -> Path:
+    """Return the corpus directory for a model + flavor combination."""
+    if flavor:
+        return DATASET_DIR / model / flavor / "corpus"
+    return DATASET_DIR / model / "corpus"
+
+
+def _read_manifest(batch_id: str) -> Dict[str, Any]:
+    manifest_path = UPLOADS_DIR / batch_id / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(404, f"Upload batch '{batch_id}' not found")
+    with manifest_path.open() as f:
+        return json.load(f)
+
+
+@app.post("/upload/{model_name}", summary="Upload training data ZIP (non-destructive)")
+async def upload_training_data(
+    model_name: str,
+    file: UploadFile = File(..., description="ZIP archive of training data files"),
+    flavor: str = Form(default="", description="Model flavor, e.g. 'article/light'"),
+    batch_name: str = Form(default="", description="Optional human-readable label for this batch"),
+):
+    """
+    Upload a ZIP of training data files for a model (and optional flavor).
+
+    Files are copied into the target corpus directory **only if they do not
+    already exist** — existing files are never overwritten.  Every upload is
+    recorded as a batch under `grobid-trainer/resources/uploads/{batch_id}/`
+    so it can be inspected or reverted later.
+
+    Files inside the ZIP are flattened: only the filename is used, any
+    directory structure inside the ZIP is ignored.
+    """
+    corpus_dir = _corpus_dir(model_name, flavor)
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+
+    batch_id  = str(uuid.uuid4())[:8]
+    batch_dir = UPLOADS_DIR / batch_id
+    batch_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save the original archive
+    zip_bytes = await file.read()
+    (batch_dir / "archive.zip").write_bytes(zip_bytes)
+
+    files_added: List[str]   = []
+    files_skipped: List[str] = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            for entry in zf.infolist():
+                if entry.is_dir():
+                    continue
+                # Flatten: use only the filename, drop any directory prefix
+                filename = Path(entry.filename).name
+                if not filename:
+                    continue
+                dest = corpus_dir / filename
+                if dest.exists():
+                    files_skipped.append(filename)
+                else:
+                    dest.write_bytes(zf.read(entry.filename))
+                    files_added.append(filename)
+
+    manifest = {
+        "batch_id":      batch_id,
+        "batch_name":    batch_name,
+        "model":         model_name,
+        "flavor":        flavor,
+        "timestamp":     datetime.utcnow().isoformat(),
+        "corpus_dir":    str(corpus_dir),
+        "files_added":   files_added,
+        "files_skipped": files_skipped,
+    }
+    (batch_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+    return {
+        "batch_id":           batch_id,
+        "model":              model_name,
+        "flavor":             flavor,
+        "files_added_count":  len(files_added),
+        "files_skipped_count": len(files_skipped),
+        "files_added":        files_added,
+        "files_skipped":      files_skipped,
+    }
+
+
+@app.get("/uploads", summary="List upload batches")
+def list_uploads(model: str = "", flavor: str = ""):
+    """
+    List all recorded upload batches, optionally filtered by model and/or flavor.
+    """
+    if not UPLOADS_DIR.exists():
+        return []
+    result = []
+    for batch_dir in sorted(UPLOADS_DIR.iterdir()):
+        manifest_path = batch_dir / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        with manifest_path.open() as f:
+            m = json.load(f)
+        if model  and m.get("model")  != model:
+            continue
+        if flavor and m.get("flavor") != flavor:
+            continue
+        result.append({
+            "batch_id":           m["batch_id"],
+            "batch_name":         m.get("batch_name", ""),
+            "model":              m["model"],
+            "flavor":             m.get("flavor", ""),
+            "timestamp":          m["timestamp"],
+            "files_added_count":  len(m.get("files_added", [])),
+            "files_skipped_count": len(m.get("files_skipped", [])),
+        })
+    return result
+
+
+@app.get("/uploads/{batch_id}", summary="Get upload batch details")
+def get_upload(batch_id: str):
+    """Return the full manifest for an upload batch."""
+    return _read_manifest(batch_id)
+
+
+@app.post("/revert/{batch_id}", summary="Revert an upload batch")
+def revert_upload(batch_id: str):
+    """
+    Remove all files that were added by this upload batch from the corpus,
+    then delete the batch record.  Files already removed are skipped (idempotent).
+    """
+    manifest   = _read_manifest(batch_id)
+    corpus_dir = Path(manifest["corpus_dir"])
+    removed    = []
+    missing    = []
+
+    for filename in manifest.get("files_added", []):
+        target = corpus_dir / filename
+        if target.exists():
+            target.unlink()
+            removed.append(filename)
+        else:
+            missing.append(filename)
+
+    shutil.rmtree(UPLOADS_DIR / batch_id, ignore_errors=True)
+
+    return {
+        "batch_id":      batch_id,
+        "files_removed": removed,
+        "files_missing": missing,
+    }
 
 
 @app.get("/health", summary="Service health and environment info")

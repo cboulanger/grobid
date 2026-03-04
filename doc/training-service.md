@@ -218,6 +218,134 @@ GET /jobs
 curl http://localhost:8072/jobs
 ```
 
+## Listing available flavors
+
+```bash
+GET /flavors
+```
+
+Returns a dictionary mapping each model name (as it appears in the dataset directory) to the list of flavor paths that have a corpus on disk.  Only models that actually have flavored datasets are included; models with only the default corpus are omitted.
+
+```bash
+curl http://localhost:8072/flavors
+```
+
+Example response:
+
+```json
+{
+  "fulltext":     ["article/light"],
+  "header":       ["article/light", "sdo/ietf"],
+  "segmentation": ["article/dh-law-footnotes", "article/light", "sdo/ietf"]
+}
+```
+
+The flavor strings returned here can be passed directly as the `flavor` field in training requests.
+
+## Uploading training data
+
+```bash
+POST /upload/{model_name}
+```
+
+Uploads a ZIP archive of training data files for a model and optional flavor.  Files are copied into the correct corpus directory **non-destructively**: if a file with the same name already exists it is skipped, never overwritten.  Every upload is recorded as a *batch* so it can be inspected or reverted later.
+
+**Multipart form fields:**
+
+| Field | Required | Description |
+| ----- | -------- | ----------- |
+| `file` | yes | ZIP archive containing training data files |
+| `flavor` | no | Model flavor, e.g. `article/dh-law-footnotes` (default: `""`) |
+| `batch_name` | no | Optional human-readable label for this batch |
+
+Files inside the ZIP are **flattened**: any directory structure is ignored and only the bare filename is used.  This matches the flat layout expected in the corpus directories.
+
+If the target corpus directory does not exist (e.g. for a new flavor) it is created automatically.
+
+**Example — upload data for a new segmentation flavor:**
+
+```bash
+curl -X POST http://localhost:8072/upload/segmentation \
+  -F "file=@/path/to/my-data.zip" \
+  -F "flavor=article/dh-law-footnotes" \
+  -F "batch_name=initial dataset"
+```
+
+**Response:**
+
+```json
+{
+  "batch_id":            "c11fb1c3",
+  "model":               "segmentation",
+  "flavor":              "article/dh-law-footnotes",
+  "files_added_count":   42,
+  "files_skipped_count": 0,
+  "files_added":         ["doc001.train", "doc002.train", "..."],
+  "files_skipped":       []
+}
+```
+
+Record the `batch_id` if you may need to revert this upload later.
+
+### Batch storage
+
+Each batch is saved under `grobid-trainer/resources/uploads/{batch_id}/` (gitignored):
+
+```text
+uploads/
+  c11fb1c3/
+    manifest.json   ← model, flavor, timestamp, files_added, files_skipped
+    archive.zip     ← original ZIP kept for reference
+```
+
+### Listing upload batches
+
+```bash
+GET /uploads[?model=<model>&flavor=<flavor>]
+```
+
+Returns a summary list of all recorded batches, optionally filtered by model and/or flavor.
+
+```bash
+curl "http://localhost:8072/uploads?model=segmentation"
+```
+
+### Inspecting a batch
+
+```bash
+GET /uploads/{batch_id}
+```
+
+Returns the full manifest for a single batch, including the complete file lists.
+
+```bash
+curl http://localhost:8072/uploads/c11fb1c3
+```
+
+### Reverting an upload
+
+```bash
+POST /revert/{batch_id}
+```
+
+Removes every file that was **added** by this batch from the corpus, then deletes the batch record.  Files that were skipped at upload time (already existed) are not touched.  If a file has already been removed manually, it is skipped silently — the operation is idempotent within a single batch.
+
+```bash
+curl -X POST http://localhost:8072/revert/c11fb1c3
+```
+
+**Response:**
+
+```json
+{
+  "batch_id":      "c11fb1c3",
+  "files_removed": ["doc001.train", "doc002.train", "..."],
+  "files_missing": []
+}
+```
+
+Once reverted the batch record is deleted; a subsequent call to the same `batch_id` returns 404.
+
 ## Health check
 
 ```bash

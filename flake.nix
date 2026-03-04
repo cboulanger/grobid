@@ -73,7 +73,8 @@
                   tensorflow-metal \
                   jep \
                   fastapi \
-                  "uvicorn[standard]"; then
+                  "uvicorn[standard]" \
+                  python-multipart; then
                 touch "$SENTINEL"
                 echo "==> Python environment ready."
               else
