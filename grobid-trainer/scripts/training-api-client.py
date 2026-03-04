@@ -14,6 +14,7 @@ Usage examples:
   python training-api-client.py train header --mode 0 --incremental --flavor article/light
   python training-api-client.py eval nlm --p2t /path/to/dataset
   python training-api-client.py eval tei --p2t /path/to/dataset --run --file-ratio 0.5
+  python training-api-client.py stop <job_id>
   python training-api-client.py upload segmentation ./my-data --flavor article/dh-law-footnotes
   python training-api-client.py uploads [--model segmentation] [--flavor article/light]
   python training-api-client.py revert <batch_id>
@@ -155,6 +156,12 @@ def cmd_flavors(base_url: str, args) -> int:
         for model, flavors in sorted(data.items()):
             for f in flavors:
                 print(f"{model}\t{f}")
+    return 0
+
+
+def cmd_stop(base_url: str, args) -> int:
+    result = _post(f"{base_url}/jobs/{args.job_id}/stop", {})
+    print(f"job_id={result.get('job_id','?')}  status={result.get('status','?')}")
     return 0
 
 
@@ -411,6 +418,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("-v", "--verbose", action="store_true",
                           help="Print full JSON response and complete log")
 
+    # stop
+    p_stop = sub.add_parser("stop", help="Stop a running job (sends SIGTERM)")
+    p_stop.add_argument("job_id", help="Job ID to stop")
+
     # stream
     p_stream = sub.add_parser("stream", help="Stream live log of a running job")
     p_stream.add_argument("job_id", help="Job ID")
@@ -481,6 +492,7 @@ def main() -> None:
         "flavors": cmd_flavors,
         "jobs":    cmd_jobs,
         "status":  cmd_status,
+        "stop":    cmd_stop,
         "stream":  cmd_stream,
         "train":   cmd_train,
         "eval":    cmd_eval,

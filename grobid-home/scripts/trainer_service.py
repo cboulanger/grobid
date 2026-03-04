@@ -17,6 +17,7 @@ Endpoints:
     POST /evaluate/{nlm|tei}    Run end-to-end evaluation
     GET  /jobs/{job_id}         Job status + full log
     GET  /jobs/{job_id}/stream  Live log via SSE
+    POST /jobs/{job_id}/stop    Stop a running job
     GET  /jobs                  List all jobs
     GET  /flavors               Flavors per model (from dataset dirs)
     POST /upload/{model}        Upload ZIP of training data (non-destructive)
@@ -154,7 +155,8 @@ def _stream_proc(job_id: str, proc: subprocess.Popen) -> None:
         proc.wait()
         with _jobs_lock:
             job["exit_code"] = proc.returncode
-            job["status"]    = "done" if proc.returncode == 0 else "failed"
+            if job["status"] != "cancelled":   # don't overwrite a user-requested stop
+                job["status"] = "done" if proc.returncode == 0 else "failed"
     except Exception as exc:
         with _jobs_lock:
             job["log"].append(f"[service error] {exc}")
@@ -188,7 +190,8 @@ def _start_job(cmd: List[str]) -> str:
         cwd=str(GROBID_ROOT),
         bufsize=1,
     )
-    job["pid"] = proc.pid
+    job["pid"]  = proc.pid
+    job["proc"] = proc          # kept for stop endpoint; not exposed in API responses
     threading.Thread(target=_stream_proc, args=(job_id, proc), daemon=True).start()
     return job_id
 
@@ -381,7 +384,7 @@ def stream_job(job_id: str):
                 job   = _jobs[job_id]
                 lines = job["log"]
                 new   = lines[seen:]
-                done  = job["status"] != "running"
+                done  = job["status"] not in ("running",)
 
             for line in new:
                 yield f"data: {line}\n\n"
@@ -395,6 +398,33 @@ def stream_job(job_id: str):
             time.sleep(0.3)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.post("/jobs/{job_id}/stop", summary="Stop a running job")
+def stop_job(job_id: str):
+    """
+    Send SIGTERM to a running job's subprocess and mark it as cancelled.
+
+    If the job is not running (already done, failed, or cancelled) a 409 is
+    returned.  The job record is kept so the partial log can still be retrieved.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"Job '{job_id}' not found")
+    with _jobs_lock:
+        if job["status"] != "running":
+            raise HTTPException(409, f"Job '{job_id}' is not running (status: {job['status']})")
+        job["status"] = "cancelled"
+
+    proc: Optional[subprocess.Popen] = job.get("proc")
+    if proc is not None:
+        try:
+            proc.terminate()        # SIGTERM — graceful shutdown
+        except OSError:
+            pass                    # process already exited between the check and here
+
+    return {"job_id": job_id, "status": "cancelled"}
 
 
 @app.get("/jobs", summary="List all jobs")
