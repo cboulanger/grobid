@@ -1,4 +1,11 @@
-# GROBID Trainer HTTP Service
+# GROBID Trainer HTTP Service for Apple Silicon
+
+!!! important "Platform-specific notes"
+    The service described here is experimental and has been tested only on Apple Silicon, specifically on a M4-Mac (32GB), with a dependency on
+    the [`nix` environment](use-nix-for-apple-silicon.md). In principle,
+    is should also work on other platforms but your mileage may vary.
+
+## Goal
 
 The trainer service wraps GROBID model training and end-to-end evaluation in a REST API. Instead of running Gradle tasks directly from the command line, you can trigger and monitor training jobs over HTTP — useful for scripting, CI workflows, or remote operation.
 
@@ -6,7 +13,6 @@ The service is implemented in [`grobid-home/scripts/trainer_service.py`](../grob
 
 !!! important "Prerequisites"
     The trainer service must be run inside the Nix development environment to have access to Java 21, the correct native libraries, and (optionally) the Metal GPU for DeLFT models. See [Using the Nix environment](use-nix-environment.md) for setup instructions.
-
 
 ## Quick start
 
@@ -26,7 +32,6 @@ curl http://localhost:8072/health
 
 Interactive API documentation (Swagger UI) is available at `http://localhost:8072/docs` while the service is running.
 
-
 ## How it works
 
 The service is a lightweight [FastAPI](https://fastapi.tiangolo.com/) application. When a training request arrives, it:
@@ -39,7 +44,6 @@ The service is a lightweight [FastAPI](https://fastapi.tiangolo.com/) applicatio
 
 Multiple jobs can run concurrently, though training is CPU/memory-intensive — running more than one heavy model at a time on a single machine is not recommended.
 
-
 ## Training a model
 
 ```bash
@@ -51,7 +55,7 @@ POST /train/{model_name}
 **Request body (JSON):**
 
 | Field | Type | Default | Description |
-|-------|------|---------|-------------|
+| ----- | ---- | ------- | ----------- |
 | `mode` | int | `0` | Training mode (see table below) |
 | `seg_ratio` | float | `0.8` | Train/eval split ratio used in mode 2 |
 | `n_folds` | int | `10` | Number of folds used in mode 3 |
@@ -61,7 +65,7 @@ POST /train/{model_name}
 **Training modes:**
 
 | Mode | Description | Data used |
-|------|-------------|-----------|
+| ---- | ----------- | --------- |
 | `0` | Train only | All files in `grobid-trainer/resources/dataset/{model}/corpus/` |
 | `1` | Evaluate only | All files in `grobid-trainer/resources/dataset/{model}/evaluation/` |
 | `2` | Auto-split, then train + evaluate | Corpus split by `seg_ratio`; no files needed in `evaluation/` |
@@ -112,7 +116,6 @@ curl -X POST http://localhost:8072/train/citation \
 
 Trained models are written to `grobid-home/models/{model}/` and replace the previous model. A backup is saved as `model.wapiti.old`.
 
-
 ## End-to-end evaluation
 
 End-to-end evaluation measures GROBID's full extraction pipeline (PDF → structured output) against a gold-standard dataset. See [End-to-end evaluation](End-to-end-evaluation.md) for dataset preparation details.
@@ -126,7 +129,7 @@ POST /evaluate/{eval_type}
 **Request body (JSON):**
 
 | Field | Type | Default | Description |
-|-------|------|---------|-------------|
+| ----- | ---- | ------- | ----------- |
 | `p2t` | string | required | Absolute path to the gold-standard dataset directory |
 | `run` | bool | `false` | Run GROBID on the PDFs before evaluating (requires GROBID service on port 8070) |
 | `file_ratio` | float | `1.0` | Fraction of the dataset to use (0.0–1.0) |
@@ -153,7 +156,6 @@ curl -X POST http://localhost:8072/evaluate/nlm \
 ```
 
 The evaluation report is written to `grobid-home/tmp/report.md`.
-
 
 ## Monitoring jobs
 
@@ -197,7 +199,7 @@ curl -N http://localhost:8072/jobs/a3f1bc7e/stream
 
 Each log line is delivered as an SSE `data` event. When the job finishes, a final `event: done` message is sent with the exit code:
 
-```
+```text
 data: Loading Wapiti model...
 data: Iteration 1/100 — loss: 0.342
 data: Iteration 2/100 — loss: 0.298
@@ -215,7 +217,6 @@ GET /jobs
 ```bash
 curl http://localhost:8072/jobs
 ```
-
 
 ## Health check
 
@@ -249,13 +250,12 @@ Check `jar_built: true` before submitting training jobs. If `false`, build the J
 ./gradlew :grobid-trainer:shadowJar --no-daemon
 ```
 
-
 ## Valid models
 
 The following model names are accepted by `POST /train/{model_name}`:
 
 | Model name | Description |
-|------------|-------------|
+| ---------- | ----------- |
 | `date` | Date parsing |
 | `header` | Header metadata extraction |
 | `name-header` | Author names in header |
@@ -272,18 +272,16 @@ The following model names are accepted by `POST /train/{model_name}`:
 | `shorttext` | Short-text classification |
 | `ebook-model` | E-book processing |
 
-
 ## Flavours
 
 Some models support variants that are trained on specific document types. Pass the flavour string in the `flavor` field:
 
 | Flavour | Applicable models | Description |
-|---------|-------------------|-------------|
+| ------- | ----------------- | ----------- |
 | `""` (empty) | all | Default general model |
 | `article/light` | `header`, `segmentation`, `fulltext` | Lightweight article model |
 | `article/light-ref` | `header`, `segmentation`, `fulltext` | Lightweight article model with references |
 | `sdo/ietf` | `header`, `segmentation` | IETF standards documents |
-
 
 ## Command-line options
 
@@ -297,27 +295,25 @@ optional arguments:
   --port PORT   Bind port (default: 8072)
 ```
 
-
 ## Relation to Gradle training tasks
 
 The service invokes the pre-built `grobid-trainer-*-onejar.jar` directly rather than going through Gradle. This avoids Gradle startup overhead for each request. The JAR's main class (`org.grobid.trainer.TrainerRunner`) accepts the same arguments that the Gradle tasks pass internally:
 
-```
+```text
 TrainerRunner  <mode>  <model_name>  -gH <grobid_home>  [-s <seg_ratio>]  [-n <n_folds>]  [-i]
 ```
 
 End-to-end evaluation uses a second class in the same JAR:
 
-```
+```text
 EndToEndEvaluation  <nlm|tei>  <p2t>  <run>  <file_ratio>  <flavor>
 ```
 
 Both classes are equivalent to running the corresponding Gradle tasks (`train_*`, `jatsEval`, `teiEval`).
 
-
 ## Troubleshooting
 
-**`jar_built: false` in `/health`**
+### `jar_built: false` in `/health`
 
 The trainer JAR has not been built yet:
 
@@ -325,7 +321,7 @@ The trainer JAR has not been built yet:
 ./gradlew :grobid-trainer:shadowJar --no-daemon
 ```
 
-**Job status is `failed` with exit code `1`**
+### Job status is `failed` with exit code `1`
 
 Check the full log for details:
 
@@ -335,7 +331,7 @@ curl http://localhost:8072/jobs/{job_id}
 
 Common causes: missing training data in `grobid-trainer/resources/dataset/{model}/corpus/`, insufficient heap space (increase `-Xmx` in the service source), or a DeLFT import error if using deep-learning models.
 
-**Deep-learning model fails with `jep.JepException`**
+### Deep-learning model fails with `jep.JepException`
 
 The JEP library or DeLFT is not correctly installed. Verify:
 
@@ -350,7 +346,7 @@ If this fails, rebuild the venv:
 rm -rf .venv && nix develop
 ```
 
-**Training takes unexpectedly long**
+### Training takes unexpectedly long
 
 CRF (Wapiti) training is CPU-bound and benefits from the M4's efficiency cores. DeLFT training uses the Metal GPU via `tensorflow-metal`; verify GPU is active:
 
