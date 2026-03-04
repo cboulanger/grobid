@@ -185,7 +185,27 @@ Response:
 }
 ```
 
-Possible `status` values: `running`, `done`, `failed`.
+Possible `status` values: `running`, `done`, `failed`, `cancelled`.
+
+### Stop a running job
+
+```bash
+POST /jobs/{job_id}/stop
+```
+
+```bash
+curl -X POST http://localhost:8072/jobs/a3f1bc7e/stop
+```
+
+Sends SIGTERM to the job's subprocess and immediately marks the job as `cancelled`.  The job record and its partial log are preserved and can still be retrieved via `GET /jobs/{job_id}`.
+
+Response:
+
+```json
+{ "job_id": "a3f1bc7e", "status": "cancelled" }
+```
+
+Returns **409** if the job is not currently running (already `done`, `failed`, or `cancelled`).
 
 ### Stream live output (Server-Sent Events)
 

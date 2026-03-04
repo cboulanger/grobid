@@ -151,6 +151,25 @@ Prints a one-line summary of the job (status, duration, exit code).  With `-v` /
 
 ---
 
+### `stop` — Stop a running job
+
+```bash
+python training-api-client.py stop <job_id>
+```
+
+Sends SIGTERM to the job's subprocess and marks it as `cancelled`.  Returns immediately — does not wait for the process to exit.  The partial log remains accessible via `status <job_id>`.
+
+Returns an error if the job is not currently running.
+
+**Example:**
+
+```bash
+python training-api-client.py stop a3f1bc7e
+# → job_id=a3f1bc7e  status=cancelled
+```
+
+---
+
 ### `stream` — Stream a job's log
 
 ```bash
