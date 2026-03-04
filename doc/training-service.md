@@ -176,6 +176,9 @@ Response:
   "job_id": "a3f1bc7e",
   "status": "done",
   "exit_code": 0,
+  "model": "date",
+  "flavor": "",
+  "mode": 0,
   "log": "Loading model...\n[training output...]\nDone.",
   "start_time": "2024-03-01T10:00:00",
   "end_time":   "2024-03-01T10:12:34",
@@ -233,6 +236,8 @@ data: exit_code=0
 ```bash
 GET /jobs
 ```
+
+Returns a summary list of all jobs including their `model` (for training jobs) or `eval_type` (for evaluation jobs) and `flavor`.
 
 ```bash
 curl http://localhost:8072/jobs

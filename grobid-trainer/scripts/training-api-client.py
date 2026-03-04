@@ -165,35 +165,53 @@ def cmd_stop(base_url: str, args) -> int:
     return 0
 
 
+def _job_subject(j: dict) -> str:
+    """Return a short human-readable subject string for a job (model or eval_type + flavor)."""
+    model     = j.get("model") or ""
+    eval_type = j.get("eval_type") or ""
+    flavor    = j.get("flavor") or ""
+    subject   = model or eval_type
+    if flavor:
+        subject = f"{subject}/{flavor}"
+    return subject
+
+
 def cmd_jobs(base_url: str, _args) -> int:
     jobs = _get(f"{base_url}/jobs")
     if not jobs:
         print("No jobs found.")
         return 0
     # Simple table
-    col_id    = max(len("JOB ID"),  max(len(j.get("job_id", "")) for j in jobs))
-    col_st    = max(len("STATUS"),  max(len(j.get("status", "")) for j in jobs))
-    col_time  = max(len("STARTED"),  max(len((j.get("start_time") or "")[:19]) for j in jobs))
+    col_id   = max(len("JOB ID"),  max(len(j.get("job_id", "")) for j in jobs))
+    col_st   = max(len("STATUS"),  max(len(j.get("status", "")) for j in jobs))
+    col_time = max(len("STARTED"), max(len((j.get("start_time") or "")[:19]) for j in jobs))
+    col_subj = max(len("MODEL/FLAVOR"), max(len(_job_subject(j)) for j in jobs))
 
-    header = f"{'JOB ID':<{col_id}}  {'STATUS':<{col_st}}  {'STARTED':<{col_time}}  CMD"
+    header = (f"{'JOB ID':<{col_id}}  {'STATUS':<{col_st}}  {'STARTED':<{col_time}}"
+              f"  {'MODEL/FLAVOR':<{col_subj}}  CMD")
     print(header)
     print("-" * (len(header) + 20))
     for j in jobs:
-        job_id    = j.get("job_id", "")
-        status    = j.get("status", "")
-        started   = (j.get("start_time") or "")[:19]
-        cmd       = j.get("cmd", "")[:80]
-        print(f"{job_id:<{col_id}}  {status:<{col_st}}  {started:<{col_time}}  {cmd}")
+        job_id  = j.get("job_id", "")
+        status  = j.get("status", "")
+        started = (j.get("start_time") or "")[:19]
+        subject = _job_subject(j)
+        cmd     = j.get("cmd", "")[:60]
+        print(f"{job_id:<{col_id}}  {status:<{col_st}}  {started:<{col_time}}"
+              f"  {subject:<{col_subj}}  {cmd}")
     return 0
 
 
 def cmd_status(base_url: str, args) -> int:
     job = _get(f"{base_url}/jobs/{args.job_id}")
-    status   = job.get("status", "?")
-    duration = job.get("duration_s")
+    status    = job.get("status", "?")
+    duration  = job.get("duration_s")
     exit_code = job.get("exit_code")
+    subject   = _job_subject(job)
 
     parts = [f"[{status}]"]
+    if subject:
+        parts.append(f"subject={subject}")
     if duration is not None:
         parts.append(f"duration={duration:.1f}s")
     if exit_code is not None:

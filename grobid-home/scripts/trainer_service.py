@@ -167,7 +167,7 @@ def _stream_proc(job_id: str, proc: subprocess.Popen) -> None:
             job["end_time"] = datetime.utcnow().isoformat()
 
 
-def _start_job(cmd: List[str]) -> str:
+def _start_job(cmd: List[str], **meta: Any) -> str:
     job_id = str(uuid.uuid4())[:8]
     job: Dict[str, Any] = {
         "job_id":     job_id,
@@ -178,6 +178,7 @@ def _start_job(cmd: List[str]) -> str:
         "end_time":   None,
         "pid":        None,
         "cmd":        " ".join(cmd),
+        **meta,
     }
     with _jobs_lock:
         _jobs[job_id] = job
@@ -290,8 +291,8 @@ def train(model_name: str, req: TrainRequest):
     if req.flavor:
         cmd.append(req.flavor)
 
-    job_id = _start_job(cmd)
-    return {"job_id": job_id, "status": "running", "model": model_name, "mode": req.mode}
+    job_id = _start_job(cmd, model=model_name, flavor=req.flavor, mode=req.mode)
+    return {"job_id": job_id, "status": "running", "model": model_name, "flavor": req.flavor, "mode": req.mode}
 
 
 @app.post(
@@ -335,8 +336,8 @@ def evaluate(eval_type: str, req: EvalRequest):
         req.flavor,
     ]
 
-    job_id = _start_job(cmd)
-    return {"job_id": job_id, "status": "running", "type": eval_type, "p2t": req.p2t}
+    job_id = _start_job(cmd, eval_type=eval_type, flavor=req.flavor)
+    return {"job_id": job_id, "status": "running", "eval_type": eval_type, "flavor": req.flavor, "p2t": req.p2t}
 
 
 @app.get("/jobs/{job_id}", summary="Get job status and log")
@@ -357,7 +358,7 @@ def get_job(job_id: str):
             pass
 
     return {
-        **{k: v for k, v in job.items() if k != "log"},
+        **{k: v for k, v in job.items() if k not in ("log", "proc")},
         "log":        "\n".join(job["log"]),
         "duration_s": duration,
     }
@@ -436,6 +437,9 @@ def list_jobs():
                 "job_id":     j["job_id"],
                 "status":     j["status"],
                 "start_time": j["start_time"],
+                "model":      j.get("model"),
+                "eval_type":  j.get("eval_type"),
+                "flavor":     j.get("flavor"),
                 "cmd":        j["cmd"][:120],
             }
             for j in _jobs.values()

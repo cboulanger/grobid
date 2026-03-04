@@ -137,7 +137,7 @@ python training-api-client.py eval nlm --p2t /data/PMC_sample_1943 --run --file-
 python training-api-client.py jobs
 ```
 
-Prints a table of all submitted jobs with their IDs, status, start time, and a truncated command.
+Prints a table of all submitted jobs with their IDs, status, start time, model/flavor (or eval type/flavor for evaluation jobs), and a truncated command.
 
 ---
 
@@ -147,7 +147,7 @@ Prints a table of all submitted jobs with their IDs, status, start time, and a t
 python training-api-client.py status <job_id> [-v]
 ```
 
-Prints a one-line summary of the job (status, duration, exit code).  With `-v` / `--verbose`, also prints the full JSON response and the complete log.
+Prints a one-line summary of the job (status, model/flavor, duration, exit code).  With `-v` / `--verbose`, also prints the full JSON response and the complete log.
 
 ---
 
