@@ -3,7 +3,6 @@
 GROBID Trainer HTTP Service
 ============================
 Wraps grobid-trainer for model training and end-to-end evaluation via REST API.
-Designed for Apple Silicon (M4) running inside `nix develop` from flake.nix.
 
 Usage:
     python grobid-home/scripts/trainer_service.py [--port 8072] [--host 0.0.0.0]
@@ -17,8 +16,10 @@ Endpoints:
     POST /evaluate/{nlm|tei}    Run end-to-end evaluation
     GET  /jobs/{job_id}         Job status + full log
     GET  /jobs/{job_id}/stream  Live log via SSE
-    POST /jobs/{job_id}/stop    Stop a running job
-    GET  /jobs                  List all jobs
+    POST   /jobs/{job_id}/stop    Stop a running job
+    DELETE /jobs/{job_id}         Delete a finished/failed/cancelled job record
+    DELETE /jobs                  Delete all non-running job records
+    GET    /jobs                  List all jobs
     GET  /flavors               Flavors per model (from dataset dirs)
     POST /upload/{model}        Upload ZIP of training data (non-destructive)
     GET  /uploads               List upload batches
@@ -208,10 +209,12 @@ def _make_per_job_grobid_home(
 
     # Optionally patch Wapiti training parameters.
     if epsilon is not None or nb_max_iterations is not None:
-        yaml_model_key = model_name if not flavor else f"{model_name}-{flavor.replace('/', '-')}"
+        flavor_key = f"{model_name}-{flavor.replace('/', '-')}" if flavor else None
+        # Try flavor-specific key first, fall back to base model name
+        keys_to_try = [k for k in [flavor_key, model_name] if k]
         patched = False
         for m in config.get("grobid", {}).get("models", []):
-            if m.get("name") == yaml_model_key:
+            if m.get("name") in keys_to_try:
                 if m.get("wapiti") is None:
                     m["wapiti"] = {}
                 if epsilon is not None:
@@ -219,10 +222,17 @@ def _make_per_job_grobid_home(
                 if nb_max_iterations is not None:
                     m["wapiti"]["nbMaxIterations"] = nb_max_iterations
                 patched = True
+                matched_key = m.get("name")
+                if flavor_key and matched_key != flavor_key:
+                    print(
+                        f"INFO: flavor-specific key '{flavor_key}' not found in grobid.yaml — "
+                        f"applied overrides to base model '{matched_key}'.",
+                        flush=True,
+                    )
                 break
         if not patched:
             print(
-                f"WARNING: model '{yaml_model_key}' not found in grobid.yaml — "
+                f"WARNING: model '{keys_to_try[0]}' not found in grobid.yaml — "
                 "epsilon/nb_max_iterations overrides ignored.",
                 flush=True,
             )
@@ -726,6 +736,40 @@ def stop_job(job_id: str):
             pass                    # process already exited between the check and here
 
     return {"job_id": job_id, "status": "cancelled"}
+
+
+@app.delete("/jobs/{job_id}", summary="Delete a job record")
+def delete_job(job_id: str):
+    """
+    Delete a completed, failed, or cancelled job record.
+
+    Returns 404 if the job does not exist, 409 if the job is still running.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"Job '{job_id}' not found")
+    with _jobs_lock:
+        if job["status"] == "running":
+            raise HTTPException(409, f"Job '{job_id}' is still running; stop it first")
+        del _jobs[job_id]
+    return {"deleted": job_id}
+
+
+@app.delete("/jobs", summary="Delete all non-running job records")
+def delete_all_jobs():
+    """
+    Delete all job records that are not currently running.
+
+    Running jobs are skipped. Returns the list of deleted job IDs and
+    the count of skipped running jobs.
+    """
+    with _jobs_lock:
+        to_delete = [jid for jid, j in _jobs.items() if j["status"] != "running"]
+        skipped   = len(_jobs) - len(to_delete)
+        for jid in to_delete:
+            del _jobs[jid]
+    return {"deleted": to_delete, "skipped_running": skipped}
 
 
 @app.get("/jobs", summary="List all jobs")

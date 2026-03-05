@@ -44,7 +44,7 @@ The service is a lightweight [FastAPI](https://fastapi.tiangolo.com/) applicatio
 
 Multiple jobs can run concurrently, though training is CPU/memory-intensive — running more than one heavy model at a time on a single machine is not recommended.
 
-## Training a model
+## Training and evaluating models
 
 ```bash
 POST /train/{model_name}
@@ -262,6 +262,42 @@ Returns a summary list of all jobs.  Each entry includes `model` (training jobs)
 
 ```bash
 curl http://localhost:8072/jobs
+```
+
+### Delete a job record
+
+```bash
+DELETE /jobs/{job_id}
+```
+
+Removes a finished (`done`, `failed`, or `cancelled`) job record from memory.  Returns **409** if the job is still running, **404** if not found.
+
+```bash
+curl -X DELETE http://localhost:8072/jobs/a3f1bc7e
+```
+
+Response:
+
+```json
+{ "deleted": "a3f1bc7e" }
+```
+
+### Delete all non-running job records
+
+```bash
+DELETE /jobs
+```
+
+Removes all job records that are not currently `running` in a single call.  Running jobs are silently skipped.
+
+```bash
+curl -X DELETE http://localhost:8072/jobs
+```
+
+Response:
+
+```json
+{ "deleted": ["a3f1bc7e", "b4c2de8f"], "skipped_running": 1 }
 ```
 
 ## Managing model files
