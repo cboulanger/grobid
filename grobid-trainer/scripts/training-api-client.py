@@ -182,13 +182,14 @@ def cmd_jobs(base_url: str, _args) -> int:
         print("No jobs found.")
         return 0
     # Simple table
-    col_id   = max(len("JOB ID"),  max(len(j.get("job_id", "")) for j in jobs))
-    col_st   = max(len("STATUS"),  max(len(j.get("status", "")) for j in jobs))
-    col_time = max(len("STARTED"), max(len((j.get("start_time") or "")[:19]) for j in jobs))
+    col_id   = max(len("JOB ID"),       max(len(j.get("job_id", "")) for j in jobs))
+    col_st   = max(len("STATUS"),       max(len(j.get("status", "")) for j in jobs))
+    col_time = max(len("STARTED"),      max(len((j.get("start_time") or "")[:19]) for j in jobs))
     col_subj = max(len("MODEL/FLAVOR"), max(len(_job_subject(j)) for j in jobs))
+    col_tmf  = max(len("TRAINED FILE"), max(len(j.get("trained_model_file") or "") for j in jobs))
 
     header = (f"{'JOB ID':<{col_id}}  {'STATUS':<{col_st}}  {'STARTED':<{col_time}}"
-              f"  {'MODEL/FLAVOR':<{col_subj}}  CMD")
+              f"  {'MODEL/FLAVOR':<{col_subj}}  {'TRAINED FILE':<{col_tmf}}  CMD")
     print(header)
     print("-" * (len(header) + 20))
     for j in jobs:
@@ -196,9 +197,10 @@ def cmd_jobs(base_url: str, _args) -> int:
         status  = j.get("status", "")
         started = (j.get("start_time") or "")[:19]
         subject = _job_subject(j)
+        tmf     = j.get("trained_model_file") or ""
         cmd     = j.get("cmd", "")[:60]
         print(f"{job_id:<{col_id}}  {status:<{col_st}}  {started:<{col_time}}"
-              f"  {subject:<{col_subj}}  {cmd}")
+              f"  {subject:<{col_subj}}  {tmf:<{col_tmf}}  {cmd}")
     return 0
 
 
@@ -209,9 +211,12 @@ def cmd_status(base_url: str, args) -> int:
     exit_code = job.get("exit_code")
     subject   = _job_subject(job)
 
+    trained_file = job.get("trained_model_file")
     parts = [f"[{status}]"]
     if subject:
         parts.append(f"subject={subject}")
+    if trained_file:
+        parts.append(f"trained_model_file={trained_file}")
     if duration is not None:
         parts.append(f"duration={duration:.1f}s")
     if exit_code is not None:
@@ -242,6 +247,12 @@ def cmd_train(base_url: str, args) -> int:
         "incremental": args.incremental,
         "flavor":      args.flavor,
     }
+    if args.epsilon is not None:
+        payload["epsilon"] = args.epsilon
+    if args.nb_max_iterations is not None:
+        payload["nb_max_iterations"] = args.nb_max_iterations
+    if args.keep_existing:
+        payload["keep_existing"] = True
     result = _post(f"{base_url}/train/{args.model}", payload)
     job_id = result.get("job_id", "?")
     status = result.get("status", "?")
@@ -249,6 +260,37 @@ def cmd_train(base_url: str, args) -> int:
 
     if not args.no_stream:
         return sse_stream(f"{base_url}/jobs/{job_id}/stream")
+    return 0
+
+
+def cmd_model_files(base_url: str, args) -> int:
+    params = f"?flavor={urllib.parse.quote(args.flavor)}" if args.flavor else ""
+    data = _get(f"{base_url}/models/{args.model}{params}")
+    files = data.get("files", [])
+    if not files:
+        print("No model files found.")
+        return 0
+    print(f"{'NAME':<40}  {'SIZE':>10}  {'MODIFIED':>22}  ACTIVE")
+    print("-" * 82)
+    for f in files:
+        active = "✓" if f.get("is_active") else ""
+        print(f"{f['name']:<40}  {f['size_bytes']:>10,}  {f['modified_at'][:19]:>22}  {active}")
+    return 0
+
+
+def cmd_delete_model(base_url: str, args) -> int:
+    params = urllib.parse.urlencode({"name": args.name, "flavor": args.flavor})
+    url = f"{base_url}/models/{args.model}?{params}"
+    req = urllib.request.Request(url, method="DELETE")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        _die(f"HTTP {e.code}: {body}")
+    except urllib.error.URLError as e:
+        _die(f"Cannot reach service: {e.reason}")
+    print(f"deleted: {result.get('deleted')}")
     return 0
 
 
@@ -459,6 +501,21 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Model variant, e.g. 'article/light'")
     p_train.add_argument("--no-stream", action="store_true",
                          help="Submit job and return immediately without streaming the log")
+    p_train.add_argument("--epsilon", type=float, default=None,
+                         help=(
+                             "Wapiti convergence threshold for this job only "
+                             "(overrides grobid.yaml). "
+                             "Presets: 0.001=fast, 0.0001=development, 0.00001=production"
+                         ))
+    p_train.add_argument("--nb-max-iterations", type=int, default=None,
+                         dest="nb_max_iterations",
+                         help="Maximum Wapiti iterations for this job only (overrides grobid.yaml)")
+    p_train.add_argument("--keep-existing", action="store_true",
+                         dest="keep_existing",
+                         help=(
+                             "Save the new model as model.wapiti.{timestamp} instead of "
+                             "overwriting the active model. The previous active model is preserved."
+                         ))
 
     # eval
     p_eval = sub.add_parser("eval", help="Run end-to-end evaluation")
@@ -473,6 +530,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--flavor", default="", help="Model variant, e.g. 'article/light'")
     p_eval.add_argument("--no-stream", action="store_true",
                         help="Submit job and return immediately without streaming the log")
+
+    # model-files
+    p_mlist = sub.add_parser("model-files", help="List model files (wapiti variants) for a model")
+    p_mlist.add_argument("model", help="Model name (e.g. header, citation)")
+    p_mlist.add_argument("--flavor", default="", help="Model flavor, e.g. 'article/light'")
+
+    # delete-model
+    p_mdel = sub.add_parser("delete-model", help="Delete a specific model file")
+    p_mdel.add_argument("model", help="Model name (e.g. header, citation)")
+    p_mdel.add_argument("name",  help="Filename to delete, e.g. model.wapiti.20260305-143022")
+    p_mdel.add_argument("--flavor", default="", help="Model flavor, e.g. 'article/light'")
 
     # upload
     p_upload = sub.add_parser("upload", help="Upload training data ZIP (non-destructive)")
@@ -505,9 +573,11 @@ def main() -> None:
     base_url = f"http://{args.host}:{args.port}"
 
     dispatch = {
-        "health":  cmd_health,
-        "models":  cmd_models,
-        "flavors": cmd_flavors,
+        "health":       cmd_health,
+        "models":       cmd_models,         # list model names from health endpoint
+        "model-files":  cmd_model_files,   # list model wapiti files
+        "delete-model": cmd_delete_model,
+        "flavors":      cmd_flavors,
         "jobs":    cmd_jobs,
         "status":  cmd_status,
         "stop":    cmd_stop,

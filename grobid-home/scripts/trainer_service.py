@@ -24,6 +24,8 @@ Endpoints:
     GET  /uploads               List upload batches
     GET  /uploads/{batch_id}    Get upload batch details
     POST /revert/{batch_id}     Revert an upload batch
+    GET  /models/{model}        List model files (wapiti variants) for a model
+    DELETE /models/{model}      Delete a specific model file by name
     GET  /health                Environment info
 
 Notes on evaluation:
@@ -49,6 +51,8 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+
+import yaml
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -121,8 +125,15 @@ def build_java_lib_path() -> str:
     return ":".join(p for p in parts if p)
 
 
-def _base_java_cmd(jar: Path, *, use_cp: bool = False) -> List[str]:
-    """Base JVM invocation with memory, module opens, and library path."""
+def _base_java_cmd(jar: Path, *, use_cp: bool = False, grobid_home: Optional[Path] = None) -> List[str]:
+    """Base JVM invocation with memory, module opens, and library path.
+
+    Pass grobid_home to override the grobid home via -Dorg.grobid.home.
+    GrobidHomeFinder checks this system property first, making it the only
+    reliable way to redirect GROBID to a per-job home directory.
+    (The -gH CLI flag is parsed by TrainerRunner but never applied to
+    GrobidProperties — it is effectively ignored.)
+    """
     lib_path = build_java_lib_path()
     cmd = [
         "java",
@@ -132,11 +143,197 @@ def _base_java_cmd(jar: Path, *, use_cp: bool = False) -> List[str]:
         "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
         "--add-opens", "java.base/java.io=ALL-UNNAMED",
     ]
+    if grobid_home is not None:
+        cmd.append(f"-Dorg.grobid.home={grobid_home}")
     if use_cp:
         cmd += ["-cp", str(jar)]
     else:
         cmd += ["-jar", str(jar)]
     return cmd
+
+
+# ── Per-job grobid-home ────────────────────────────────────────────────────────
+
+def _make_per_job_grobid_home(
+    job_id: str,
+    model_name: str,
+    flavor: str,
+    epsilon: Optional[float],
+    nb_max_iterations: Optional[int],
+    model_file: Optional[str] = None,
+) -> Optional[Path]:
+    """
+    Create a temporary grobid-home for a single training job.
+    Returns None if no overrides are needed (all parameters are None).
+
+    Always writes a patched grobid.yaml with grobidHome set to the temp dir's
+    absolute path.  Without this, GROBID resolves the relative "grobid-home"
+    value from the process working directory and ignores -gH, so model paths
+    always point at the real grobid-home regardless of the temp dir structure.
+
+    The temp dir is created inside GROBID_ROOT (not /tmp/) because
+    AbstractTrainer.getFilePath2Resources() resolves the training dataset as
+    {grobidHome}/../grobid-trainer/resources — it must be a sibling of grobid-trainer/.
+
+    Structure:
+        {tmpdir}/config/grobid.yaml   ← patched copy (grobidHome + optional Wapiti params)
+        {tmpdir}/models/              ← symlink to real models dir, or overridden subtree
+        {tmpdir}/<everything else>    ← symlinks to real grobid-home
+
+    The caller is responsible for deleting the directory when the job finishes.
+    """
+    if epsilon is None and nb_max_iterations is None and model_file is None:
+        return None
+
+    # ── Build temporary grobid-home ────────────────────────────────────────────
+    # Create the temp dir first so we know its absolute path, which must be
+    # written into grobid.yaml (grobidHome).  Without this, GROBID resolves
+    # the relative "grobid-home" value from the working directory and ignores
+    # the -gH flag entirely, meaning all model overrides have no effect.
+    #
+    # Create the temp dir inside GROBID_ROOT (not /tmp/) so that
+    # AbstractTrainer.getFilePath2Resources() can find the training dataset via
+    # {grobidHome}/../grobid-trainer/resources (it walks one level up from grobidHome).
+    tmp_home = Path(tempfile.mkdtemp(prefix=f"grobid-job-{job_id}-", dir=GROBID_ROOT))
+
+    # ── Yaml config: always write a patched copy ───────────────────────────────
+    config_path = GROBID_HOME / "config" / "grobid.yaml"
+    with config_path.open() as f:
+        config = yaml.safe_load(f)
+
+    # Point grobidHome at the temp dir so model paths resolve through it.
+    if "grobid" not in config:
+        config["grobid"] = {}
+    config["grobid"]["grobidHome"] = str(tmp_home)
+
+    # Optionally patch Wapiti training parameters.
+    if epsilon is not None or nb_max_iterations is not None:
+        yaml_model_key = model_name if not flavor else f"{model_name}-{flavor.replace('/', '-')}"
+        patched = False
+        for m in config.get("grobid", {}).get("models", []):
+            if m.get("name") == yaml_model_key:
+                if m.get("wapiti") is None:
+                    m["wapiti"] = {}
+                if epsilon is not None:
+                    m["wapiti"]["epsilon"] = epsilon
+                if nb_max_iterations is not None:
+                    m["wapiti"]["nbMaxIterations"] = nb_max_iterations
+                patched = True
+                break
+        if not patched:
+            print(
+                f"WARNING: model '{yaml_model_key}' not found in grobid.yaml — "
+                "epsilon/nb_max_iterations overrides ignored.",
+                flush=True,
+            )
+
+    config_dir = tmp_home / "config"
+    config_dir.mkdir()
+    with (config_dir / "grobid.yaml").open("w") as f:
+        yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+
+    # Symlink every other entry from the real grobid-home (models handled below)
+    for entry in GROBID_HOME.iterdir():
+        if entry.name in ("config", "models"):
+            continue
+        (tmp_home / entry.name).symlink_to(entry.resolve())
+
+    # Models: override specific model file, or symlink whole models dir
+    if model_file:
+        _override_model_dir(tmp_home, model_name, flavor, model_file)
+    else:
+        (tmp_home / "models").symlink_to((GROBID_HOME / "models").resolve())
+
+    return tmp_home
+
+
+# ── Model directory helpers ───────────────────────────────────────────────────
+
+def _model_dir(model_name: str, flavor: str) -> Path:
+    """Return the model directory for a model + optional flavor."""
+    base = GROBID_HOME / "models" / model_name
+    return base / flavor if flavor else base
+
+
+def _post_training_rename(model_name: str, flavor: str, keep_existing: bool) -> str:
+    """
+    Post-process model files after a successful training run.
+
+    The JAR always leaves:
+        model.wapiti       — newly trained model
+        model.wapiti.old   — previous model (may not exist on first train)
+
+    keep_existing=False (default):
+        Rename model.wapiti.old → model.wapiti.{timestamp}
+        Active model stays as model.wapiti (new model replaces old)
+
+    keep_existing=True:
+        Rename model.wapiti     → model.wapiti.{timestamp}  (new, for inspection)
+        Rename model.wapiti.old → model.wapiti              (restore previous active)
+
+    Returns the filename of the newly trained model.
+    """
+    mdir    = _model_dir(model_name, flavor)
+    ts      = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    active  = mdir / "model.wapiti"
+    old     = mdir / "model.wapiti.old"
+    ts_name = f"model.wapiti.{ts}"
+    ts_path = mdir / ts_name
+
+    if not mdir.exists():
+        print(
+            f"[service warning] post-training rename skipped: model directory not found: {mdir}",
+            flush=True,
+        )
+        return "model.wapiti"
+
+    if keep_existing:
+        if active.exists():
+            active.rename(ts_path)      # new model → timestamped
+        if old.exists():
+            old.rename(active)          # previous model restored as active
+        return ts_path.resolve().name
+    else:
+        if old.exists():
+            old.rename(ts_path)         # previous model → timestamped (replaces .old)
+        return (mdir / "model.wapiti").resolve().name
+
+
+def _override_model_dir(tmp_home: Path, model_name: str, flavor: str, model_file: str) -> None:
+    """
+    Build a models/ subtree inside tmp_home where the target model's
+    model.wapiti symlinks to the specified model_file instead of the real one.
+
+    All other model dirs and files are symlinked from the real grobid-home.
+    """
+    real_models = GROBID_HOME / "models"
+    tmp_models  = tmp_home / "models"
+    tmp_models.mkdir()
+
+    # Symlink every top-level model dir except our target
+    for entry in real_models.iterdir():
+        if entry.name != model_name:
+            (tmp_models / entry.name).symlink_to(entry.resolve())
+
+    # Walk down model_name[/flavor] creating real dirs and symlinking siblings
+    parts    = [model_name] + (flavor.split("/") if flavor else [])
+    real_cur = real_models
+    tmp_cur  = tmp_models
+    for i, part in enumerate(parts):
+        real_cur = real_cur / part
+        tmp_cur  = tmp_cur / part
+        tmp_cur.mkdir(exist_ok=True)
+        is_leaf = (i == len(parts) - 1)
+        for entry in real_cur.iterdir():
+            if is_leaf and entry.name == "model.wapiti":
+                continue    # replaced below
+            (tmp_cur / entry.name).symlink_to(entry.resolve())
+
+    # Override model.wapiti with the requested file
+    target = real_models.joinpath(*parts) / model_file
+    if not target.exists():
+        raise FileNotFoundError(f"Model file not found: {target}")
+    (tmp_cur / "model.wapiti").symlink_to(target.resolve())
 
 
 # ── Job management ─────────────────────────────────────────────────────────────
@@ -165,10 +362,24 @@ def _stream_proc(job_id: str, proc: subprocess.Popen) -> None:
     finally:
         with _jobs_lock:
             job["end_time"] = datetime.now(timezone.utc).isoformat()
+        # Post-training: rename model files (timestamped backup, keep_existing swap)
+        if job.get("status") == "done" and job.get("mode") in (0, 2, 3) and job.get("model"):
+            try:
+                trained_file = _post_training_rename(
+                    job["model"], job.get("flavor", ""), job.get("keep_existing", False)
+                )
+                with _jobs_lock:
+                    job["trained_model_file"] = trained_file
+            except Exception as exc:
+                with _jobs_lock:
+                    job["log"].append(f"[service warning] post-training rename failed: {exc}")
+        tmp_home = job.get("_tmp_home")
+        if tmp_home:
+            shutil.rmtree(tmp_home, ignore_errors=True)
 
 
 def _start_job(cmd: List[str], **meta: Any) -> str:
-    job_id = str(uuid.uuid4())[:8]
+    job_id = meta.pop("job_id", None) or str(uuid.uuid4())[:8]
     job: Dict[str, Any] = {
         "job_id":     job_id,
         "status":     "running",
@@ -230,6 +441,39 @@ class TrainRequest(BaseModel):
         default="",
         description="Model flavour variant, e.g. 'article/light', 'article/light-ref', 'sdo/ietf'",
     )
+    epsilon: Optional[float] = Field(
+        default=None,
+        description=(
+            "Wapiti L-BFGS convergence threshold. Overrides the value in grobid.yaml for this job only. "
+            "Smaller = more iterations = longer training, higher accuracy. "
+            "Suggested values: 0.001 (fast/smoke-test), 0.0001 (development), 0.00001 (production)."
+        ),
+    )
+    nb_max_iterations: Optional[int] = Field(
+        default=None,
+        description=(
+            "Maximum number of Wapiti training iterations. Overrides the value in grobid.yaml for this job only. "
+            "Combine with a looser epsilon to cap training time during development."
+        ),
+    )
+    keep_existing: bool = Field(
+        default=False,
+        description=(
+            "If true, the newly trained model is saved as model.wapiti.{timestamp} and the "
+            "current active model is preserved unchanged. "
+            "If false (default), the new model becomes the active model.wapiti; "
+            "the previous model is saved as model.wapiti.{timestamp} instead of .old."
+        ),
+    )
+    model_file: Optional[str] = Field(
+        default=None,
+        description=(
+            "For mode=1 (evaluate only): specific model filename to evaluate, "
+            "e.g. 'model.wapiti.20260305-143022'. "
+            "Omit to use the currently active model.wapiti. "
+            "Ignored for modes 0, 2, and 3."
+        ),
+    )
 
 
 class EvalRequest(BaseModel):
@@ -243,6 +487,14 @@ class EvalRequest(BaseModel):
     )
     file_ratio: float = Field(default=1.0, description="Fraction of the dataset to use (0.0–1.0)")
     flavor: str = Field(default="", description="Model flavour variant")
+    model_file: Optional[str] = Field(
+        default=None,
+        description=(
+            "Specific model filename to evaluate against, e.g. 'model.wapiti.20260305-143022'. "
+            "Omit to use the currently active model.wapiti. "
+            "The named file must exist in the model's directory."
+        ),
+    )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -273,6 +525,18 @@ def train(model_name: str, req: TrainRequest):
     if req.mode not in (0, 1, 2, 3):
         raise HTTPException(400, "mode must be 0, 1, 2, or 3")
 
+    if req.flavor:
+        flavor_dataset_dir = (
+            GROBID_ROOT / "grobid-trainer" / "resources" / "dataset" / model_name / req.flavor
+        )
+        if not flavor_dataset_dir.is_dir():
+            raise HTTPException(
+                400,
+                f"Unknown flavor '{req.flavor}' for model '{model_name}'. "
+                f"No dataset directory found at: {flavor_dataset_dir}. "
+                "Use GET /flavors to list available flavors.",
+            )
+
     jar = find_trainer_jar()
     if jar is None:
         raise HTTPException(
@@ -281,7 +545,19 @@ def train(model_name: str, req: TrainRequest):
             "  ./gradlew :grobid-trainer:shadowJar --no-daemon",
         )
 
-    cmd = _base_java_cmd(jar) + [str(req.mode), model_name, "-gH", str(GROBID_HOME)]
+    model_file = req.model_file if req.mode == 1 else None
+    if model_file and ("/" in model_file or "\\" in model_file):
+        raise HTTPException(400, "model_file must be a bare filename, not a path")
+
+    job_id   = str(uuid.uuid4())[:8]
+    tmp_home = _make_per_job_grobid_home(
+        job_id, model_name, req.flavor, req.epsilon, req.nb_max_iterations, model_file
+    )
+    effective_home = tmp_home if tmp_home else GROBID_HOME
+
+    cmd = _base_java_cmd(jar, grobid_home=effective_home) + [
+        str(req.mode), model_name, "-gH", str(effective_home),
+    ]
     if req.mode == 2:
         cmd += ["-s", str(req.seg_ratio)]
     if req.mode == 3:
@@ -291,7 +567,17 @@ def train(model_name: str, req: TrainRequest):
     if req.flavor:
         cmd.append(req.flavor)
 
-    job_id = _start_job(cmd, model=model_name, flavor=req.flavor, mode=req.mode)
+    job_id = _start_job(
+        cmd,
+        job_id=job_id,
+        model=model_name,
+        flavor=req.flavor,
+        mode=req.mode,
+        epsilon=req.epsilon,
+        nb_max_iterations=req.nb_max_iterations,
+        keep_existing=req.keep_existing,
+        _tmp_home=str(tmp_home) if tmp_home else None,
+    )
     return {"job_id": job_id, "status": "running", "model": model_name, "flavor": req.flavor, "mode": req.mode}
 
 
@@ -327,6 +613,20 @@ def evaluate(eval_type: str, req: EvalRequest):
             "  ./gradlew :grobid-trainer:shadowJar --no-daemon",
         )
 
+    eval_job_id = str(uuid.uuid4())[:8]
+    if req.model_file:
+        # Validate: no path separators
+        if "/" in req.model_file or "\\" in req.model_file:
+            raise HTTPException(400, "model_file must be a bare filename, not a path")
+        # Derive model_name from eval_type isn't possible — model_file override for
+        # end-to-end eval requires knowing which model to override; not supported here.
+        # model_file is only meaningful for mode-1 (single-model eval via /train).
+        raise HTTPException(
+            400,
+            "model_file is not supported for end-to-end evaluation (/evaluate). "
+            "Use POST /train/{model} with mode=1 and model_file to evaluate a single model."
+        )
+
     cmd = _base_java_cmd(jar, use_cp=True) + [
         "org.grobid.trainer.evaluation.EndToEndEvaluation",
         eval_type,
@@ -336,7 +636,7 @@ def evaluate(eval_type: str, req: EvalRequest):
         req.flavor,
     ]
 
-    job_id = _start_job(cmd, eval_type=eval_type, flavor=req.flavor)
+    job_id = _start_job(cmd, job_id=eval_job_id, eval_type=eval_type, flavor=req.flavor)
     return {"job_id": job_id, "status": "running", "eval_type": eval_type, "flavor": req.flavor, "p2t": req.p2t}
 
 
@@ -358,7 +658,7 @@ def get_job(job_id: str):
             pass
 
     return {
-        **{k: v for k, v in job.items() if k not in ("log", "proc")},
+        **{k: v for k, v in job.items() if k not in ("log", "proc", "_tmp_home")},
         "log":        "\n".join(job["log"]),
         "duration_s": duration,
     }
@@ -434,13 +734,14 @@ def list_jobs():
     with _jobs_lock:
         return [
             {
-                "job_id":     j["job_id"],
-                "status":     j["status"],
-                "start_time": j["start_time"],
-                "model":      j.get("model"),
-                "eval_type":  j.get("eval_type"),
-                "flavor":     j.get("flavor"),
-                "cmd":        j["cmd"][:120],
+                "job_id":             j["job_id"],
+                "status":             j["status"],
+                "start_time":         j["start_time"],
+                "model":              j.get("model"),
+                "eval_type":          j.get("eval_type"),
+                "flavor":             j.get("flavor"),
+                "trained_model_file": j.get("trained_model_file"),
+                "cmd":                j["cmd"][:120],
             }
             for j in _jobs.values()
         ]
@@ -649,6 +950,65 @@ def revert_upload(batch_id: str):
         "files_removed": removed,
         "files_missing": missing,
     }
+
+
+@app.get("/models/{model_name}", summary="List model files for a model")
+def list_model_files(model_name: str, flavor: str = ""):
+    """
+    List all model files present in the model directory for a given model and
+    optional flavor.
+
+    Returns one entry per file matching `model.wapiti*`, including:
+    - `name` — bare filename
+    - `size_bytes` — file size
+    - `modified_at` — ISO 8601 UTC modification timestamp
+    - `is_active` — true if this is the currently active `model.wapiti`
+    """
+    if model_name not in VALID_MODELS:
+        raise HTTPException(400, f"Unknown model '{model_name}'")
+    mdir = _model_dir(model_name, flavor)
+    if not mdir.exists():
+        raise HTTPException(404, f"Model directory not found: {mdir}")
+    entries = []
+    for f in sorted(mdir.iterdir()):
+        if f.name.startswith("model.wapiti") and f.is_file():
+            stat = f.stat()
+            entries.append({
+                "name":        f.name,
+                "size_bytes":  stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                "is_active":   f.name == "model.wapiti",
+            })
+    return {"model": model_name, "flavor": flavor, "files": entries}
+
+
+@app.delete("/models/{model_name}", summary="Delete a model file")
+def delete_model_file(model_name: str, name: str, flavor: str = ""):
+    """
+    Delete a specific model file by name from the model directory.
+
+    - `name` must be a bare filename (no path separators).
+    - Deleting the active `model.wapiti` is not allowed (returns 409).
+    - Returns 404 if the file does not exist.
+    """
+    if model_name not in VALID_MODELS:
+        raise HTTPException(400, f"Unknown model '{model_name}'")
+    if "/" in name or "\\" in name:
+        raise HTTPException(400, "name must be a bare filename, not a path")
+    if name == "model.wapiti":
+        raise HTTPException(409, "Cannot delete the active model file 'model.wapiti'. "
+                                 "Activate a different model first.")
+    mdir   = _model_dir(model_name, flavor)
+    target = mdir / name
+    # Path traversal guard
+    try:
+        target.resolve().relative_to(mdir.resolve())
+    except ValueError:
+        raise HTTPException(400, "Invalid filename")
+    if not target.exists():
+        raise HTTPException(404, f"Model file '{name}' not found")
+    target.unlink()
+    return {"model": model_name, "flavor": flavor, "deleted": name}
 
 
 @app.get("/health", summary="Service health and environment info")

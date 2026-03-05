@@ -77,6 +77,10 @@ Submits a training job and streams the log live until the job completes.
 | `--incremental` | off | Start from existing model instead of training from scratch |
 | `--flavor FLAVOR` | `""` | Model flavor, e.g. `article/light` |
 | `--no-stream` | off | Submit job and return immediately without streaming the log |
+| `--epsilon FLOAT` | *(from config)* | Wapiti convergence threshold for this job only. Presets: `0.001`=fast, `0.0001`=development, `0.00001`=production |
+| `--nb-max-iterations N` | *(from config)* | Maximum Wapiti iterations for this job only |
+| `--keep-existing` | off | Save the new model as `model.wapiti.{timestamp}` instead of making it active; the current active model is preserved |
+| `--model-file FILENAME` | *(active model)* | **Mode 1 only.** Evaluate a specific model file, e.g. `model.wapiti.20260305-143022` |
 
 **Examples:**
 
@@ -95,6 +99,15 @@ python training-api-client.py train segmentation --incremental --flavor article/
 
 # Submit without waiting for output
 python training-api-client.py train date --no-stream
+
+# Fast development run: loose convergence, capped iterations
+python training-api-client.py train header --mode 2 --epsilon 0.0001 --nb-max-iterations 500
+
+# Train but keep the active model unchanged (new model saved with timestamp)
+python training-api-client.py train header --keep-existing
+
+# Evaluate a specific previously-trained model file (mode 1)
+python training-api-client.py train header --mode 1 --model-file model.wapiti.20260305-143022
 ```
 
 The command exits with code `0` on success, non-zero if training fails.
@@ -137,7 +150,16 @@ python training-api-client.py eval nlm --p2t /data/PMC_sample_1943 --run --file-
 python training-api-client.py jobs
 ```
 
-Prints a table of all submitted jobs with their IDs, status, start time, model/flavor (or eval type/flavor for evaluation jobs), and a truncated command.
+Prints a table of all submitted jobs with their IDs, status, start time, model/flavor (or eval type/flavor for evaluation jobs), trained model file (for completed training jobs), and a truncated command.
+
+Output:
+
+```text
+JOB ID    STATUS  STARTED              MODEL/FLAVOR  TRAINED FILE                   CMD
+--------------------------------------------------------------------------------------------
+a3f1bc7e  done    2026-03-05T09:26:46  date          model.wapiti.20260305-092650   java -Xmx4g ...
+fada459a  done    2026-03-05T09:26:48  date                                         java -Xmx4g ...
+```
 
 ---
 
@@ -147,7 +169,11 @@ Prints a table of all submitted jobs with their IDs, status, start time, model/f
 python training-api-client.py status <job_id> [-v]
 ```
 
-Prints a one-line summary of the job (status, model/flavor, duration, exit code).  With `-v` / `--verbose`, also prints the full JSON response and the complete log.
+Prints a one-line summary of the job (status, model/flavor, trained model file if set, duration, exit code).  With `-v` / `--verbose`, also prints the full JSON response and the complete log.
+
+```text
+[done]  subject=date  trained_model_file=model.wapiti.20260305-092650  duration=123.4s  exit_code=0
+```
 
 ---
 
@@ -177,6 +203,54 @@ python training-api-client.py stream <job_id>
 ```
 
 Connects to the SSE stream for a job and prints log lines live.  Useful for attaching to a job that was submitted with `--no-stream`.
+
+---
+
+### `model-files` — List model files
+
+```bash
+python training-api-client.py model-files <model> [--flavor FLAVOR]
+```
+
+Lists all `model.wapiti*` files for the given model/flavor, with size, modification time, and whether each file is the currently active model.
+
+**Examples:**
+
+```bash
+# List all model files for the header model
+python training-api-client.py model-files header
+
+# List model files for a specific flavor
+python training-api-client.py model-files header --flavor article/light
+```
+
+Output:
+
+```text
+NAME                           SIZE        MODIFIED              ACTIVE
+model.wapiti                   17.1 MB     2026-03-05T14:30:22   *
+model.wapiti.20260305-143022   17.1 MB     2026-03-05T12:15:01
+```
+
+---
+
+### `delete-model` — Delete a model file
+
+```bash
+python training-api-client.py delete-model <model> <name> [--flavor FLAVOR]
+```
+
+Deletes a specific model file by name.  The active `model.wapiti` cannot be deleted (use `model-files` to identify which file is active first).
+
+**Examples:**
+
+```bash
+# Delete a timestamped model file
+python training-api-client.py delete-model header model.wapiti.20260305-143022
+
+# Delete from a specific flavor
+python training-api-client.py delete-model header model.wapiti.20260305-143022 --flavor article/light
+```
 
 ---
 
@@ -301,11 +375,23 @@ python training-api-client.py upload segmentation ./my-data \
   --flavor article/dh-law-footnotes \
   --batch-name "initial load" -v
 
-# 4. Train the model with the new data (mode 2: auto-split train+eval)
+# 4. Train without replacing the active model (new model saved with timestamp)
 python training-api-client.py train segmentation \
   --flavor article/dh-law-footnotes \
-  --mode 2
+  --mode 2 \
+  --keep-existing
 
-# 5. If results are unsatisfactory, revert the uploaded data
+# 5. List model files to find the timestamped result
+python training-api-client.py model-files segmentation --flavor article/dh-law-footnotes
+
+# 6. Evaluate the new model explicitly (mode 1)
+python training-api-client.py train segmentation \
+  --flavor article/dh-law-footnotes \
+  --mode 1 \
+  --model-file model.wapiti.20260305-143022
+
+# 7. If results are unsatisfactory, delete the new model and revert the data
+python training-api-client.py delete-model segmentation model.wapiti.20260305-143022 \
+  --flavor article/dh-law-footnotes
 python training-api-client.py revert <batch_id>
 ```

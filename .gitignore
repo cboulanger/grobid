@@ -2,6 +2,7 @@
 target
 bin
 grobid-home/tmp
+grobid-job-*/
 .DS_Store
 Thumbs.db
 .project

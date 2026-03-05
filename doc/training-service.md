@@ -61,6 +61,10 @@ POST /train/{model_name}
 | `n_folds` | int | `10` | Number of folds used in mode 3 |
 | `incremental` | bool | `false` | Start from existing model instead of training from scratch |
 | `flavor` | string | `""` | Model flavour variant (see [Flavours](#flavours)) |
+| `epsilon` | float | `null` | Wapiti convergence threshold for this job only — overrides `grobid.yaml`. Omit to use the configured default. |
+| `nb_max_iterations` | int | `null` | Maximum Wapiti iterations for this job only — overrides `grobid.yaml`. Omit to use the configured default. |
+| `keep_existing` | bool | `false` | If `true`, the new model is saved as `model.wapiti.{timestamp}` and the current active model is preserved. If `false` (default), the new model becomes active and the previous is saved as `model.wapiti.{timestamp}`. |
+| `model_file` | string | `null` | **Mode 1 only.** Specific model filename to evaluate, e.g. `model.wapiti.20260305-143022`. Omit to use the active `model.wapiti`. |
 
 **Training modes:**
 
@@ -103,6 +107,14 @@ curl -X POST http://localhost:8072/train/citation \
   -d '{"mode": 0, "incremental": true}'
 ```
 
+**Example — fast development run (loose epsilon, capped iterations):**
+
+```bash
+curl -X POST http://localhost:8072/train/header \
+  -H "Content-Type: application/json" \
+  -d '{"mode": 2, "epsilon": 0.0001, "nb_max_iterations": 500}'
+```
+
 **Response:**
 
 ```json
@@ -114,7 +126,9 @@ curl -X POST http://localhost:8072/train/citation \
 }
 ```
 
-Trained models are written to `grobid-home/models/{model}/` and replace the previous model. A backup is saved as `model.wapiti.old`.
+Trained models are written to `grobid-home/models/{model}/`. After training completes, the previous model is saved as `model.wapiti.{timestamp}` (e.g. `model.wapiti.20260305-143022`). The `trained_model_file` field in the job record reports the filename of the resulting model.
+
+When `keep_existing=true`, the newly trained model is saved with a timestamp instead, and the existing active `model.wapiti` is left unchanged. Use this to test a new model without replacing the production one. Use `GET /models/{model_name}` to list all available versions and `DELETE /models/{model_name}` to remove one.
 
 ## End-to-end evaluation
 
@@ -179,14 +193,21 @@ Response:
   "model": "date",
   "flavor": "",
   "mode": 0,
+  "keep_existing": true,
   "log": "Loading model...\n[training output...]\nDone.",
   "start_time": "2024-03-01T10:00:00",
   "end_time":   "2024-03-01T10:12:34",
   "duration_s": 754.1,
   "pid": 12345,
-  "cmd": "java -Xmx4g ... grobid-trainer-0.8.3-onejar.jar 0 date -gH ..."
+  "cmd": "java -Xmx4g ... grobid-trainer-0.8.3-onejar.jar 0 date -gH ...",
+  "trained_model_file": "model.wapiti.20240301-101234"
 }
 ```
+
+`trained_model_file` is set only for completed training jobs (modes 0, 2, 3); it is `null` for evaluation jobs and while the job is still running.  The value is the resolved filename on disk — never a symlink name:
+
+- `keep_existing=false` (default): `"model.wapiti"` — the new model replaced the active one
+- `keep_existing=true`: `"model.wapiti.{timestamp}"` — the new model was saved with a timestamp; the active model is unchanged
 
 Possible `status` values: `running`, `done`, `failed`, `cancelled`.
 
@@ -237,11 +258,72 @@ data: exit_code=0
 GET /jobs
 ```
 
-Returns a summary list of all jobs including their `model` (for training jobs) or `eval_type` (for evaluation jobs) and `flavor`.
+Returns a summary list of all jobs.  Each entry includes `model` (training jobs) or `eval_type` (evaluation jobs), `flavor`, and `trained_model_file` (set for completed training jobs; `null` otherwise).
 
 ```bash
 curl http://localhost:8072/jobs
 ```
+
+## Managing model files
+
+### List model files
+
+```bash
+GET /models/{model_name}[?flavor=<flavor>]
+```
+
+Lists all `model.wapiti*` files present in the model directory, with size, modification time, and whether it is the currently active model.
+
+```bash
+curl "http://localhost:8072/models/header?flavor=article/light"
+```
+
+Response:
+
+```json
+{
+  "model": "header",
+  "flavor": "article/light",
+  "files": [
+    {
+      "name": "model.wapiti",
+      "size_bytes": 18432714,
+      "modified_at": "2026-03-05T14:30:22+00:00",
+      "is_active": true
+    },
+    {
+      "name": "model.wapiti.20260305-143022",
+      "size_bytes": 17891230,
+      "modified_at": "2026-03-05T12:15:01+00:00",
+      "is_active": false
+    }
+  ]
+}
+```
+
+Returns **404** if the model directory does not exist.
+
+### Delete a model file
+
+```bash
+DELETE /models/{model_name}?name=<filename>[&flavor=<flavor>]
+```
+
+Deletes a specific model file by name.  The `name` parameter must be a bare filename (no path separators).  Deleting the active `model.wapiti` is not allowed (returns **409**).
+
+```bash
+curl -X DELETE "http://localhost:8072/models/header?name=model.wapiti.20260305-143022&flavor=article/light"
+```
+
+Response:
+
+```json
+{ "deleted": "model.wapiti.20260305-143022" }
+```
+
+Returns **400** if `name` contains path separators, **404** if the file does not exist, **409** if you attempt to delete the active `model.wapiti`.
+
+---
 
 ## Listing available flavors
 
@@ -463,6 +545,44 @@ EndToEndEvaluation  <nlm|tei>  <p2t>  <run>  <file_ratio>  <flavor>
 ```
 
 Both classes are equivalent to running the corresponding Gradle tasks (`train_*`, `jatsEval`, `teiEval`).
+
+## Tuning training speed (epsilon)
+
+CRF (Wapiti) training time is dominated by the L-BFGS convergence threshold `epsilon`. The default values in `grobid.yaml` are tuned for production accuracy and can make training take many hours. The `epsilon` and `nb_max_iterations` fields let you override these per-request without editing any config file.
+
+| Preset | `epsilon` | `nb_max_iterations` | Use case |
+| ------ | --------- | ------------------- | -------- |
+| **Fast** | `0.001` | `200` | Smoke-test: verify the pipeline runs end-to-end in minutes |
+| **Development** | `0.0001` | `500` | Iterate on training data: good enough accuracy, finishes in under an hour |
+| **Production** | *(omit — use default)* | *(omit)* | Final model: uses the tight threshold from `grobid.yaml` |
+
+A looser epsilon stops the optimizer earlier at the cost of a small accuracy drop (typically < 1 F1 point). For iterative data development, **Development** is the recommended preset: it converges fast enough to give meaningful feedback while still producing a usable model.
+
+The override is applied only for the submitted job. `grobid.yaml` is never modified.
+
+## Smoke test
+
+A temporary end-to-end smoke test script is provided at [`grobid-trainer/scripts/smoke_test.py`](../grobid-trainer/scripts/smoke_test.py).  It exercises the full model-versioning workflow against a running service:
+
+1. Health check (verifies JAR is built and the model exists)
+2. Train with fast settings (`epsilon=0.001`, `nb_max_iterations=200`) and `keep_existing=true`
+3. Verify the timestamped model file appears in `GET /models/{model}`
+4. Evaluate (mode 1) using the timestamped model file and print the field-level and instance-level metrics
+5. Delete the timestamped file via `DELETE /models/{model}`
+6. Verify the file is gone and the active `model.wapiti` is intact
+
+```bash
+# Default: model=date, no flavor
+python grobid-trainer/scripts/smoke_test.py
+
+# Override model and/or flavor
+python grobid-trainer/scripts/smoke_test.py --model header --flavor article/light
+
+# Point at a remote service
+python grobid-trainer/scripts/smoke_test.py --host 192.168.1.10 --port 8072
+```
+
+The script exits `0` on success and `1` with a descriptive error on any failure.  Training at `epsilon=0.001` / 200 iterations typically completes in a few minutes for most models.
 
 ## Troubleshooting
 
