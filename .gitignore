@@ -98,3 +98,6 @@ Dockerfile.datastet
 
 # code assistants
 .claude/
+
+# temporary models
+model.wapiti.*
