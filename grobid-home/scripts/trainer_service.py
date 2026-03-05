@@ -46,7 +46,7 @@ import threading
 import time
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -164,7 +164,7 @@ def _stream_proc(job_id: str, proc: subprocess.Popen) -> None:
             job["exit_code"] = -1
     finally:
         with _jobs_lock:
-            job["end_time"] = datetime.utcnow().isoformat()
+            job["end_time"] = datetime.now(timezone.utc).isoformat()
 
 
 def _start_job(cmd: List[str], **meta: Any) -> str:
@@ -174,7 +174,7 @@ def _start_job(cmd: List[str], **meta: Any) -> str:
         "status":     "running",
         "exit_code":  None,
         "log":        [],
-        "start_time": datetime.utcnow().isoformat(),
+        "start_time": datetime.now(timezone.utc).isoformat(),
         "end_time":   None,
         "pid":        None,
         "cmd":        " ".join(cmd),
@@ -569,7 +569,7 @@ async def upload_training_data(
         "batch_name":    batch_name,
         "model":         model_name,
         "flavor":        flavor,
-        "timestamp":     datetime.utcnow().isoformat(),
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
         "corpus_dir":    str(corpus_dir),
         "files_added":   files_added,
         "files_skipped": files_skipped,
