@@ -5,7 +5,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xml.sax.Attributes;
 import org.xml.sax.SAXException;
-import org.xml.sax.helpers.DefaultHandler;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,6 +30,7 @@ public class TEIFulltextArticleLightSaxParser extends TEIFulltextSaxParser {
 
     private boolean figureBlock = false;
 	private boolean tableBlock = false;
+    private boolean inTeiHeader = false; // flag to track when we're inside teiHeader
 
     private ArrayList<String> labeled = null; // store line by line the labeled data
 
@@ -41,6 +41,9 @@ public class TEIFulltextArticleLightSaxParser extends TEIFulltextSaxParser {
     }
 
     public void characters(char[] buffer, int start, int length) {
+        if (this.inTeiHeader) {
+            return;
+        }
         accumulator.append(buffer, start, length);
     }
 
@@ -60,7 +63,17 @@ public class TEIFulltextArticleLightSaxParser extends TEIFulltextSaxParser {
     public void endElement(String uri,
                            String localName,
                            String qName) throws SAXException {
-		if ( (!qName.equals("lb")) && (!qName.equals("pb")) && (!qName.equals("space")) ) {
+        if (qName.equals("teiHeader")) {
+            inTeiHeader = false;
+            return;
+        }
+
+        if (inTeiHeader) {
+            // Skip processing of all content inside teiHeader
+            return;
+        }
+
+        if ( (!qName.equals("lb")) && (!qName.equals("pb")) && (!qName.equals("space")) ) {
             writeData(qName, true);
 			if (!currentTags.empty()) {
 				currentTag = currentTags.peek();
@@ -78,14 +91,20 @@ public class TEIFulltextArticleLightSaxParser extends TEIFulltextSaxParser {
                              String qName,
                              Attributes atts)
             throws SAXException {
+       if (inTeiHeader) {
+            // Skip processing of all elements inside teiHeader
+            return;
+        }
+
         if (qName.equals("lb")) {
             //accumulator.append(" +LINE+ ");
             accumulator.append(" ");
         } 
 		else if (qName.equals("space")) {
             accumulator.append(" ");
-        } 
-		else {
+        } else if (qName.equals("teiHeader")) {
+            inTeiHeader = true;
+        } else {
             // we have to write first what has been accumulated yet with the upper-level tag
             String text = getText();
             if (text != null) {
@@ -117,12 +136,10 @@ public class TEIFulltextArticleLightSaxParser extends TEIFulltextSaxParser {
                         }
                     }
                 }
-            } 
-			else if (qName.equals("p") ) {
+            } else if (qName.equals("p") ) {
                 currentTags.push("<paragraph>");
 				currentTag = "<paragraph>";
-            }
-			else if (qName.equals("ref")) {
+            } else if (qName.equals("ref")) {
                 int length = atts.getLength();
 
                 // Process each attribute
@@ -156,8 +173,7 @@ public class TEIFulltextArticleLightSaxParser extends TEIFulltextSaxParser {
                         }
                     }
                 }
-            } 
-			else if (qName.equals("formula")) {
+            } else if (qName.equals("formula")) {
                 currentTags.push("<equation>");
 				currentTag = "<equation>";
             } else if (qName.equals("label")) {

@@ -38,8 +38,8 @@ public class AuthorParser {
     private final GenericTagger namesHeaderParser;
     private final GenericTagger namesCitationParser;
 
-    private static final Pattern ET_AL_REGEX_PATTERN = Pattern.compile("et\\.? al\\.?.*$");
-	
+    private static final Pattern ET_AL_PATTERN = Pattern.compile("et\\.? al\\.?");
+
     public AuthorParser() {
         namesHeaderParser = TaggerFactory.getTagger(GrobidModels.NAMES_HEADER);
         namesCitationParser = TaggerFactory.getTagger(GrobidModels.NAMES_CITATION);
@@ -53,7 +53,10 @@ public class AuthorParser {
             return null;
         }
 
-        input = ET_AL_REGEX_PATTERN.matcher(input.trim()).replaceAll(" ");
+        Matcher matcher = ET_AL_PATTERN.matcher(input.trim());
+        if (matcher.find()) {
+            input = input.substring(0, matcher.start()) + " ";
+        }
 
         // set the language to English for the analyser to avoid any bad surprises
         List<LayoutToken> tokens = GrobidAnalyzer.getInstance().tokenizeWithLayoutToken(input, new Language("en", 1.0));
@@ -75,7 +78,10 @@ public class AuthorParser {
             return null;
         }
 
-        input = ET_AL_REGEX_PATTERN.matcher(input.trim()).replaceAll(" ");
+        Matcher matcher = ET_AL_PATTERN.matcher(input.trim());
+        if (matcher.find()) {
+            input = input.substring(0, matcher.start()) + " ";
+        }
 
         // set the language to English for the analyser to avoid any bad surprises
         List<LayoutToken> tokens = GrobidAnalyzer.getInstance().tokenizeWithLayoutToken(input, new Language("en", 1.0));
@@ -133,10 +139,15 @@ public class AuthorParser {
                                         Matcher orcidMatcher = TextUtilities.ORCIDPattern.matcher(pdfAnnotation.getDestination());
                                         if (orcidMatcher.find()) {
                                             // !! here we consider the annot is at the tail or end of the names
-                                            //LF: sometimes there is no token at the end of the name, and the annotation covers all the name.
-                                            String newToken = authorsToken.getText().substring(0, authorsToken.getText().length() - charsCovered);
-                                            if (StringUtils.isNotBlank(newToken)) {
-                                                authorsToken.setText(newToken);
+
+                                            // LF: sometimes there is no token at the end of the name, and the annotation covers all the name
+                                            // Add boundary check to prevent StringIndexOutOfBoundsException
+                                            int textLength = authorsToken.getText().length();
+                                            if (charsCovered > 0 && charsCovered < textLength) {
+                                                String newToken = authorsToken.getText().substring(0, textLength - charsCovered);
+                                                if (StringUtils.isNotBlank(newToken)) {
+                                                    authorsToken.setText(newToken);
+                                                }
                                             }
                                             aut.setORCID(orcidMatcher.group(1) + "-"
                                                 + orcidMatcher.group(2) + "-" + orcidMatcher.group(3)+ "-" + orcidMatcher.group(4));

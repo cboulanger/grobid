@@ -113,10 +113,8 @@ public class FulltextTrainer extends AbstractTrainer{
                 LOGGER.info("Processing: " + name);
 
                 TEIFulltextSaxParser parser;
-                if (flavor == GrobidModels.Flavor.ARTICLE_LIGHT) {
+                if (flavor == GrobidModels.Flavor.ARTICLE_LIGHT || flavor == GrobidModels.Flavor.ARTICLE_LIGHT_WITH_REFERENCES) {
                     parser = new TEIFulltextArticleLightSaxParser();
-                } else if (flavor == GrobidModels.Flavor.ARTICLE_LIGHT_WITH_REFERENCES) {
-                    parser = new TEIFulltextArticleLightRefSaxParser();
                 } else {
                     parser = new TEIFulltextSaxParser();
                 }
