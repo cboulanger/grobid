@@ -265,6 +265,19 @@ def _model_dir(model_name: str, flavor: str) -> Path:
     return base / flavor if flavor else base
 
 
+def _jar_model_name(model_name: str, flavor: str) -> str:
+    """Return the model identifier expected by TrainerRunner for model + flavor.
+
+    TrainerRunner uses compound names like 'segmentation-dh-law-footnotes'
+    rather than separate model/flavor args. The flavor suffix is the last
+    path component of the flavor string (e.g. 'article/dh-law-footnotes' → 'dh-law-footnotes').
+    """
+    if not flavor:
+        return model_name
+    suffix = flavor.split("/")[-1]
+    return f"{model_name}-{suffix}"
+
+
 def _post_training_rename(model_name: str, flavor: str, keep_existing: bool) -> str:
     """
     Post-process model files after a successful training run.
@@ -334,9 +347,12 @@ def _override_model_dir(tmp_home: Path, model_name: str, flavor: str, model_file
         tmp_cur  = tmp_cur / part
         tmp_cur.mkdir(exist_ok=True)
         is_leaf = (i == len(parts) - 1)
+        next_part = parts[i + 1] if not is_leaf else None
         for entry in real_cur.iterdir():
             if is_leaf and entry.name == "model.wapiti":
                 continue    # replaced below
+            if next_part is not None and entry.name == next_part:
+                continue    # will be a real directory in the next iteration
             (tmp_cur / entry.name).symlink_to(entry.resolve())
 
     # Override model.wapiti with the requested file
@@ -535,16 +551,26 @@ def train(model_name: str, req: TrainRequest):
     if req.mode not in (0, 1, 2, 3):
         raise HTTPException(400, "mode must be 0, 1, 2, or 3")
 
+    dataset_base = GROBID_ROOT / "grobid-trainer" / "resources" / "dataset" / model_name
     if req.flavor:
-        flavor_dataset_dir = (
-            GROBID_ROOT / "grobid-trainer" / "resources" / "dataset" / model_name / req.flavor
-        )
-        if not flavor_dataset_dir.is_dir():
+        dataset_base = dataset_base / req.flavor
+        if not dataset_base.is_dir():
             raise HTTPException(
                 400,
                 f"Unknown flavor '{req.flavor}' for model '{model_name}'. "
-                f"No dataset directory found at: {flavor_dataset_dir}. "
+                f"No dataset directory found at: {dataset_base}. "
                 "Use GET /flavors to list available flavors.",
+            )
+    if req.mode == 1:
+        eval_dir = dataset_base / "evaluation"
+        if not eval_dir.is_dir():
+            model_label = f"'{model_name}'" + (f" / '{req.flavor}'" if req.flavor else "")
+            rel_eval = Path("grobid-trainer/resources/dataset") / model_name / (req.flavor or "") / "evaluation"
+            raise HTTPException(
+                400,
+                f"No permanent evaluation dataset exists for model {model_label}. "
+                f"Either create {rel_eval}/tei/ and {rel_eval}/raw/ with held-out documents, "
+                f"or use mode 2 (split+train+evaluate) for an automatic random split of the corpus.",
             )
 
     jar = find_trainer_jar()
@@ -566,7 +592,7 @@ def train(model_name: str, req: TrainRequest):
     effective_home = tmp_home if tmp_home else GROBID_HOME
 
     cmd = _base_java_cmd(jar, grobid_home=effective_home) + [
-        str(req.mode), model_name, "-gH", str(effective_home),
+        str(req.mode), _jar_model_name(model_name, req.flavor), "-gH", str(effective_home),
     ]
     if req.mode == 2:
         cmd += ["-s", str(req.seg_ratio)]
@@ -574,8 +600,6 @@ def train(model_name: str, req: TrainRequest):
         cmd += ["-n", str(req.n_folds)]
     if req.incremental:
         cmd += ["-i"]
-    if req.flavor:
-        cmd.append(req.flavor)
 
     job_id = _start_job(
         cmd,
