@@ -6,6 +6,7 @@ import org.grobid.core.utilities.GrobidProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -66,6 +67,16 @@ public class TaggerFactory {
             }
         }
         return t;
+    }
+
+    /**
+     * Create a tagger loading from an explicit file path. Not cached.
+     * Currently only supported for the Wapiti engine.
+     */
+    public static GenericTagger getTaggerFromPath(File modelFile, GrobidCRFEngine engine) {
+        if (engine == GrobidCRFEngine.WAPITI) return new WapitiTagger(modelFile);
+        throw new IllegalArgumentException(
+            "Custom model path is only supported for Wapiti engine, got: " + engine);
     }
 
     /**

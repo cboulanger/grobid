@@ -5,6 +5,7 @@ import org.grobid.core.GrobidModel;
 import org.grobid.core.GrobidModels;
 import org.grobid.core.jni.WapitiModel;
 
+import java.io.File;
 import java.io.IOException;
 
 public class WapitiTagger implements GenericTagger {
@@ -13,6 +14,10 @@ public class WapitiTagger implements GenericTagger {
 
     public WapitiTagger(GrobidModel model) {
         wapitiModel = new WapitiModel(model);
+    }
+
+    public WapitiTagger(File modelFile) {
+        wapitiModel = new WapitiModel(modelFile);
     }
 
     @Override

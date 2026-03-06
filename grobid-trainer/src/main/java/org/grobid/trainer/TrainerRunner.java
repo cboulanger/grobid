@@ -215,7 +215,11 @@ public class TrainerRunner {
             trainer.setParams(epsilon, window, nbMaxIterations);
         }
         if (outputModelFilePath != null) {
-            trainer.setOutputModelPath(new File(outputModelFilePath));
+            if (mode == RunType.EVAL) {
+                trainer.setEvaluationModelPath(new File(outputModelFilePath));
+            } else {
+                trainer.setOutputModelPath(new File(outputModelFilePath));
+            }
         }
 
         switch (mode) {
