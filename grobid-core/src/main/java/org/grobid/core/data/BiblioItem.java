@@ -379,6 +379,12 @@ public class BiblioItem {
     // Availability statement
     private String availabilityStmt = null;
 
+    // Conflict of interests
+    private String conflictStmt = null;
+
+    // Credits / Author contributions
+    private String contributionStmt = null;
+
     // Copyrights/license information object
     CopyrightsLicense copyrightsLicense = null;
 
@@ -1333,7 +1339,7 @@ public class BiblioItem {
 
     public void addKeyword(String k) {
         if (keywords == null)
-            keywords = new ArrayList<Keyword>();
+            keywords = new ArrayList<>();
 		String theKey = cleanKeywords(k);
 		if (theKey.toLowerCase().contains("introduction")) {
 			// if the keyword contains introduction, this is normally a segmentation error
@@ -4572,5 +4578,21 @@ public class BiblioItem {
 
     public void setStatus(String status) {
         this.status = status;
+    }
+
+    public String getConflictStmt() {
+        return conflictStmt;
+    }
+
+    public void setConflictStmt(String conflictStmt) {
+        this.conflictStmt = conflictStmt;
+    }
+
+    public String getContributionStmt() {
+        return contributionStmt;
+    }
+
+    public void setContributionStmt(String contributionStmt) {
+        this.contributionStmt = contributionStmt;
     }
 }

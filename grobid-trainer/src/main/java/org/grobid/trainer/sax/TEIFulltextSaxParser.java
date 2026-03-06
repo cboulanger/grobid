@@ -1,6 +1,9 @@
 package org.grobid.trainer.sax;
 
+import org.apache.commons.lang3.StringUtils;
 import org.grobid.core.utilities.TextUtilities;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.xml.sax.Attributes;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
@@ -9,9 +12,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Stack;
 import java.util.StringTokenizer;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * SAX parser for the TEI format for fulltext data encoded for training. Normally all training data should 
@@ -32,16 +32,20 @@ public class TEIFulltextSaxParser extends DefaultHandler {
 	
     private boolean figureBlock = false;
 	private boolean tableBlock = false;
+    private boolean inTeiHeader = false; // flag to track when we're inside teiHeader
 
     private ArrayList<String> labeled = null; // store line by line the labeled data
 
     public TEIFulltextSaxParser() {
-        labeled = new ArrayList<String>();
-        currentTags = new Stack<String>();
+        labeled = new ArrayList<>();
+        currentTags = new Stack<>();
         accumulator = new StringBuffer();
     }
 
     public void characters(char[] buffer, int start, int length) {
+        if (this.inTeiHeader) {
+            return;
+        }
         accumulator.append(buffer, start, length);
     }
 
@@ -61,7 +65,17 @@ public class TEIFulltextSaxParser extends DefaultHandler {
     public void endElement(java.lang.String uri,
                            java.lang.String localName,
                            java.lang.String qName) throws SAXException {
-		if ( (!qName.equals("lb")) && (!qName.equals("pb")) && (!qName.equals("space")) ) {
+		if (qName.equals("teiHeader")) {
+            inTeiHeader = false;
+            return;
+        }
+
+        if (inTeiHeader) {
+            // Skip processing of all content inside teiHeader
+            return;
+        }
+
+        if ( (!qName.equals("lb")) && (!qName.equals("pb")) && (!qName.equals("space")) ) {
             writeData(qName, true);
 			if (!currentTags.empty()) {
 				currentTag = currentTags.peek();
@@ -79,14 +93,20 @@ public class TEIFulltextSaxParser extends DefaultHandler {
                              String qName,
                              Attributes atts)
             throws SAXException {
+       if (inTeiHeader) {
+            // Skip processing of all elements inside teiHeader
+            return;
+        }
+
         if (qName.equals("lb")) {
             //accumulator.append(" +LINE+ ");
             accumulator.append(" ");
         } 
 		else if (qName.equals("space")) {
             accumulator.append(" ");
-        } 
-		else {
+        } else if (qName.equals("teiHeader")) {
+            inTeiHeader = true;
+        } else {
             // we have to write first what has been accumulated yet with the upper-level tag
             String text = getText();
             if (text != null) {
@@ -219,7 +239,7 @@ public class TEIFulltextSaxParser extends DefaultHandler {
                 currentTags.push("<other>");
                 currentTag = "<other>";
             } else {
-                if (!qName.equals("tei") && !qName.equals("teiHeader") && !qName.equals("fileDesc") && !qName.equals("list")) {
+                if (!StringUtils.equalsIgnoreCase(qName, "tei") && !qName.equals("teiHeader") && !qName.equals("fileDesc") && !qName.equals("list")) {
                     logger.error("Invalid element name: " + qName + " - it will be mapped to the label <other>");
                     currentTags.push("<other>");
                     currentTag = "<other>";

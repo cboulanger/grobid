@@ -1012,6 +1012,18 @@ public class HeaderParser extends AbstractParser {
                 } else{
                     biblio.setAvailabilityStmt(clusterContent);
                 }
+            } else if (clusterLabel.equals(TaggingLabels.HEADER_CONFLICT_OF_INTEREST)) {
+                if (StringUtils.isNotBlank(biblio.getConflictStmt())) {
+                    biblio.setConflictStmt(biblio.getConflictStmt() + " \n " + clusterContent);
+                } else {
+                    biblio.setConflictStmt(clusterContent);
+                }
+            } else if (clusterLabel.equals(TaggingLabels.HEADER_AUTHOR_CONTRIBUTION)) {
+                if (StringUtils.isNotBlank(biblio.getContributionStmt())) {
+                    biblio.setContributionStmt(biblio.getContributionStmt() + " \n " + clusterContent);
+                } else {
+                    biblio.setContributionStmt(clusterContent);
+                }
             } else if (clusterLabel.equals(TaggingLabels.HEADER_PHONE)) {
                 if (biblio.getPhone() != null) {
                     biblio.setPhone(biblio.getPhone() + clusterNonDehypenizedContent);
@@ -1330,6 +1342,12 @@ public class HeaderParser extends AbstractParser {
                 output = writeField(buffer, s1, lastTag0, s2, "<availability>", "<note type=\"availability\">", addSpace);
             }
             if (!output) {
+                output = writeField(buffer, s1, lastTag0, s2, "<conflict>", "<note type=\"conflict\">", addSpace);
+            }
+            if (!output) {
+                output = writeField(buffer, s1, lastTag0, s2, "<contribution>", "<note type=\"contribution\">", addSpace);
+            }
+            if (!output) {
                 output = writeField(buffer, s1, lastTag0, s2, "<other>", "", addSpace);
             }
 
@@ -1417,7 +1435,12 @@ public class HeaderParser extends AbstractParser {
                 buffer.append("</note>\n");
             } else if (lastTag0.equals("<availability>")) {
                 buffer.append("</note>\n");
+            } else if (lastTag0.equals("<conflict>")) {
+                buffer.append("</note>\n");
+            } else if (lastTag0.equals("<contribution>")) {
+                buffer.append("</note>\n");
             }
+
         }
     }
 

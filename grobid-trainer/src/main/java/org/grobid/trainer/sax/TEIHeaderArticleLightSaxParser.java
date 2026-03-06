@@ -28,14 +28,17 @@ public class TEIHeaderArticleLightSaxParser extends TEIHeaderSaxParser {
 
     private String fileName = null;
     private String pdfName = null;
+    private boolean inTeiHeader = false; // flag to track when we're inside teiHeader
 
     private ArrayList<String> labeled = null; // store line by line the labeled data
 
-    private List<String> endTags = Arrays.asList("titlePart", "docAuthor", "date", "idno");
-    private List<String> tags = Arrays.asList("titlePart", "note", "docAuthor", "affiliation", "address", "email", "idno",
-        "date", "keywords", "keyword", "reference", "ptr", "div", "editor", "meeting");
+    private List<String> endTags = Arrays.asList(
+        "titlePart", "note", "docAuthor", "affiliation",
+        "address", "email", "idno",
+        "date", "keywords", "keyword",
+        "reference", "ptr", "div", "editor", "meeting");
 
-    private List<String> intermediaryTags = Arrays.asList("byline", "front", "lb", "tei", "teiHeader", "fileDesc", "text", "byline", "docTitle", "p");
+    private List<String> intermediaryTags = Arrays.asList("byline", "front", "lb", "tei", "TEI", "teiHeader", "fileDesc", "text", "byline", "docTitle", "p");
 
     private List<String> ignoredTags = Arrays.asList("location", "version", "web", "degree", "page", "title", "phone", "publisher");
 
@@ -44,6 +47,9 @@ public class TEIHeaderArticleLightSaxParser extends TEIHeaderSaxParser {
     }
 
     public void characters(char[] buffer, int start, int length) {
+        if (inTeiHeader) {
+            return; // Skip all character data inside teiHeader
+        }
         accumulator.append(buffer, start, length);
     }
 
@@ -68,6 +74,15 @@ public class TEIHeaderArticleLightSaxParser extends TEIHeaderSaxParser {
     public void endElement(String uri,
                            String localName,
                            String qName) throws SAXException {
+        if (qName.equals("teiHeader")) {
+            inTeiHeader = false;
+            return; // Exit teiHeader and resume normal processing
+        }
+
+        if (inTeiHeader) {
+            // Skip processing of all other closing tags inside teiHeader
+            return;
+        }
         if (endTags.contains(qName)) {
             writeData();
             accumulator.setLength(0);
@@ -86,7 +101,7 @@ public class TEIHeaderArticleLightSaxParser extends TEIHeaderSaxParser {
         } else if (ignoredTags.contains(qName)) {
             // do nothing
         } else {
-//            System.out.println(" **** Warning **** Unexpected closing tag " + qName);
+            System.out.println(" **** Warning **** Unexpected closing tag " + qName);
         }
     }
 
@@ -95,7 +110,26 @@ public class TEIHeaderArticleLightSaxParser extends TEIHeaderSaxParser {
                              String qName,
                              Attributes atts)
             throws SAXException {
-        if (qName.equals("lb")) {
+       if (inTeiHeader) {
+            if (qName.equals("fileDesc")) {
+                //We need to get the pdf name from the xml:id attribute
+                for (int i = 0; i < atts.getLength(); i++) {
+                    // Get names and values for each attribute
+                    String name = atts.getQName(i);
+                    String value = atts.getValue(i);
+                    if (StringUtils.equals(name, "xml:id")) {
+                        this.pdfName = value;
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+
+        if (qName.equals("teiHeader")) {
+            inTeiHeader = true;
+            return;
+        } else if (qName.equals("lb")) {
             accumulator.append(" ");
         } else {
             // add accumulated text as <other>
