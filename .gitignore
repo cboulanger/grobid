@@ -24,6 +24,8 @@ tei-new
 raw-new
 /log
 /logs
+*.pyc
+.venv
 
 dependency-reduced-pom.xml
 

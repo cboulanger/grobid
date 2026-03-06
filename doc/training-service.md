@@ -199,12 +199,12 @@ Response:
   "end_time":   "2024-03-01T10:12:34",
   "duration_s": 754.1,
   "pid": 12345,
-  "cmd": "java -Xmx4g ... grobid-trainer-0.8.3-onejar.jar 0 date -gH ...",
+  "cmd": "java -Xmx4g ... 0 date -gH /path/to/grobid-home -epsilon 0.001 -maxIter 200 -modelPath /path/to/grobid-home/models/date/model.wapiti.20240301-101234",
   "trained_model_file": "model.wapiti.20240301-101234"
 }
 ```
 
-`trained_model_file` is set only for completed training jobs (modes 0, 2, 3); it is `null` for evaluation jobs and while the job is still running.  The value is the resolved filename on disk — never a symlink name:
+`trained_model_file` is set only for completed training jobs (modes 0, 2, 3); it is `null` for evaluation jobs and while the job is still running.
 
 - `keep_existing=false` (default): `"model.wapiti"` — the new model replaced the active one
 - `keep_existing=true`: `"model.wapiti.{timestamp}"` — the new model was saved with a timestamp; the active model is unchanged
@@ -568,11 +568,16 @@ optional arguments:
 
 ## Relation to Gradle training tasks
 
-The service invokes the pre-built `grobid-trainer-*-onejar.jar` directly rather than going through Gradle. This avoids Gradle startup overhead for each request. The JAR's main class (`org.grobid.trainer.TrainerRunner`) accepts the same arguments that the Gradle tasks pass internally:
+The service invokes the pre-built `grobid-trainer-*-onejar.jar` directly rather than going through Gradle. This avoids Gradle startup overhead for each request. The JAR's main class (`org.grobid.trainer.TrainerRunner`) accepts the following arguments:
 
 ```text
-TrainerRunner  <mode>  <model_name>  -gH <grobid_home>  [-s <seg_ratio>]  [-n <n_folds>]  [-i]
+TrainerRunner  <mode>  <model_name>  -gH <grobid_home>
+               [-s <seg_ratio>]  [-n <n_folds>]  [-i]
+               [-epsilon <float>]  [-maxIter <int>]
+               [-modelPath <absolute_path>]
 ```
+
+`-epsilon` and `-maxIter` override the Wapiti training parameters per-job without touching `grobid.yaml`. `-modelPath` sets the output path for training (mode 0) or the input model path for evaluation (mode 1).
 
 End-to-end evaluation uses a second class in the same JAR:
 

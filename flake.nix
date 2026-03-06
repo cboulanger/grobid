@@ -74,8 +74,7 @@
                   jep \
                   fastapi \
                   "uvicorn[standard]" \
-                  python-multipart \
-                  pyyaml; then
+                  python-multipart; then
                 touch "$SENTINEL"
                 echo "==> Python environment ready."
               else

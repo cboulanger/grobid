@@ -283,10 +283,8 @@ def main():
     ok(f"eval job started: {eval_job_id}")
     eval_job = wait_for_job(base, eval_job_id)
 
-    # Verify the log shows a per-job temp dir path, not the real grobid-home.
-    # Wapiti logs the symlink path (model.wapiti inside the job dir) rather than
-    # the resolved target, so we check for the job-dir prefix instead of the
-    # exact timestamped filename.
+    # Verify the log shows the exact timestamped model path, not the default model.wapiti.
+    # With -modelPath, Wapiti logs the absolute path directly (no symlinks).
     log_lines = eval_job.get("log", "").splitlines()
     model_path_lines = [l for l in log_lines if "Model path:" in l or "Loading model:" in l]
     if not model_path_lines:
@@ -296,16 +294,13 @@ def main():
             "Last 10 log lines:\n"
             + "\n".join("    " + l for l in log_lines[-10:])
         )
-    # All model-path lines must reference a per-job dir (contains "grobid-job-"),
-    # not the permanent grobid-home, which would mean the override was bypassed.
-    wrong = [l for l in model_path_lines if "grobid-job-" not in l]
+    wrong = [l for l in model_path_lines if trained_file not in l]
     if wrong:
         fail(
-            "Eval log shows real grobid-home instead of per-job override dir — "
-            f"the model_file='{trained_file}' override was not applied:\n"
+            f"Eval log shows wrong model path — expected '{trained_file}', got:\n"
             + "\n".join("    " + l for l in wrong)
         )
-    ok(f"eval log confirms per-job model override (model.wapiti → {trained_file})")
+    ok(f"eval log confirms model: {trained_file}")
 
     # Print evaluation metrics from the log.
     in_results = False
