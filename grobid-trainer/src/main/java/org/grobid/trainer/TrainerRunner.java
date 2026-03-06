@@ -34,6 +34,7 @@ public class TrainerRunner {
         "segmentation",
         "segmentation-light",
         "segmentation-light-ref",
+        "segmentation-dh-law-footnotes",
         "segmentation-ietf"
     );
     private static final List<String> options = Arrays.asList("0 - train", "1 - evaluate", "2 - split, train and evaluate", "3 - n-fold evaluation");
@@ -157,6 +158,8 @@ public class TrainerRunner {
             trainer = new SegmentationTrainer(Flavor.ARTICLE_LIGHT);
         } else if (model.equals("segmentation-light-ref")) {
             trainer = new SegmentationTrainer(Flavor.ARTICLE_LIGHT_WITH_REFERENCES);
+        } else if (model.equals("segmentation-dh-law-footnotes")) {
+            trainer = new SegmentationTrainer(Flavor.ARTICLE_DH_LAW_FOOTNOTES);
         } else if (model.equals("segmentation-ietf")) {
             trainer = new SegmentationTrainer(Flavor.IETF);
         } else if (model.equals("reference-segmenter")) {
