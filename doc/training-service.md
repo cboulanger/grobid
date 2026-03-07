@@ -717,6 +717,50 @@ The relay exposes:
 | `GET /tunnel/status` | Check whether a container is currently connected |
 | `ANY /{path}` | Proxied to the trainer service through the tunnel |
 
+### 1b. Put the relay behind nginx (recommended)
+
+If you are running the relay on a host that already serves other content via nginx, expose it on a path prefix rather than a raw port. Add these two location blocks inside your `server` block, **before** the catch-all `location /`:
+
+```nginx
+# WebSocket tunnel — HPC container dials in here
+location /tunnel {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+
+# REST + SSE endpoints — clients access the trainer through here
+location /relay/ {
+    proxy_pass http://127.0.0.1:8080/;   # trailing slash strips the prefix
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;                  # required for SSE streaming
+    proxy_cache off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    client_max_body_size 500M;            # for large training data uploads
+}
+```
+
+Apply the config:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+After this, the HPC container connects to `wss://your-domain/tunnel` and all trainer API requests go to `https://your-domain/relay/`.
+
+!!! note "Why two location blocks?"
+    The WebSocket `/tunnel` endpoint needs HTTP/1.1 upgrade headers and a very long read timeout (the connection stays open for the entire training job). The `/relay/` prefix handles regular HTTP and SSE traffic; `proxy_buffering off` is essential here so SSE chunks are not held in nginx's buffer before being forwarded to the client.
+
 ### 2. Start the trainer service with tunnel enabled
 
 Pass `--relay` (and optionally `--relay-token`) when starting the service inside the HPC container.  The tunnel client is launched automatically as a background task:
@@ -738,6 +782,8 @@ Once connected, all endpoints described in this document are accessible through 
 
 ### 3. Use the relay as if it were the local service
 
+If running the relay **directly** (no nginx, raw port 8080):
+
 ```bash
 # Health check via relay
 curl http://relay.your-domain.com:8080/health
@@ -753,6 +799,25 @@ curl -X POST http://relay.your-domain.com:8080/train/header \
 
 # Stream live output (SSE — works transparently through the tunnel)
 curl -N http://relay.your-domain.com:8080/jobs/a3f1bc7e/stream
+```
+
+If running **behind nginx** with the `/relay/` prefix (see [step 1b](#1b-put-the-relay-behind-nginx-recommended)):
+
+```bash
+# Health check via relay
+curl https://your-domain/relay/health
+
+# Upload training data
+curl -X POST https://your-domain/relay/upload/segmentation \
+  -F "file=@my-data.zip" -F "flavor=article/dh-law-footnotes"
+
+# Start training
+curl -X POST https://your-domain/relay/train/header \
+  -H "Content-Type: application/json" \
+  -d '{"mode": 2, "epsilon": 0.0001}'
+
+# Stream live output (SSE — works transparently through the tunnel)
+curl -N https://your-domain/relay/jobs/a3f1bc7e/stream
 ```
 
 ### Running as an Apptainer / Slurm job

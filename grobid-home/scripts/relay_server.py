@@ -17,6 +17,42 @@ Endpoints:
     WS   /tunnel          Tunnel connection (from HPC container)
     GET  /tunnel/status   Check tunnel liveness
     ANY  /{path:path}     Proxy to trainer service through the tunnel
+
+Reverse proxy (nginx):
+    When running behind nginx on a shared domain, add two location blocks to
+    your server block.  The WebSocket endpoint needs HTTP/1.1 upgrade headers
+    and a long read timeout; the HTTP proxy path needs buffering disabled for
+    SSE streaming.
+
+        # WebSocket tunnel — HPC container dials in here
+        location /tunnel {
+            proxy_pass http://127.0.0.1:8080;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+
+        # REST + SSE endpoints — clients access the trainer through here
+        location /relay/ {
+            proxy_pass http://127.0.0.1:8080/;   # trailing slash strips the prefix
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_buffering off;                  # required for SSE streaming
+            proxy_cache off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            client_max_body_size 500M;            # for large training data uploads
+        }
+
+    After reload, HPC connects to:  wss://your-domain/tunnel
+    Clients access trainer API at:  https://your-domain/relay/
 """
 
 import asyncio
