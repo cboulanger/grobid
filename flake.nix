@@ -74,7 +74,9 @@
                   jep \
                   fastapi \
                   "uvicorn[standard]" \
-                  python-multipart; then
+                  python-multipart \
+                  websockets \
+                  httpx; then
                 touch "$SENTINEL"
                 echo "==> Python environment ready."
               else

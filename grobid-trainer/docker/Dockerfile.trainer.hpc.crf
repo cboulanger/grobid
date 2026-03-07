@@ -1,0 +1,155 @@
+## GROBID Trainer Service — HPC image, CRF/Wapiti only
+##
+## Minimal HPC image for CRF model training.  No TensorFlow, DeLFT, or JEP.
+## Smaller and faster to build than Dockerfile.trainer.hpc; suitable when
+## only Wapiti (CRF) models need to be trained on the cluster.
+## For DeLFT/GPU model training use Dockerfile.trainer.hpc instead.
+##
+## ── Apptainer usage ───────────────────────────────────────────────────────────
+##
+## Pull image (once, on the HPC login node):
+##   apptainer pull grobid-trainer-hpc-crf.sif \
+##     docker://myuser/grobid-trainer-hpc-crf:latest
+##
+## Run interactively:
+##   apptainer run grobid-trainer-hpc-crf.sif
+##
+## Slurm job script:
+##   #!/bin/bash
+##   #SBATCH --job-name=grobid-train-crf
+##   #SBATCH --time=12:00:00
+##   #SBATCH --mem=16G
+##
+##   apptainer run \
+##     --bind /scratch/$USER/dataset:/opt/grobid/grobid-trainer/resources/dataset \
+##     --bind /scratch/$USER/models:/opt/grobid/grobid-home/models \
+##     --env RELAY_URL=ws://relay.your-domain.com:8080/tunnel \
+##     --env RELAY_TOKEN="$RELAY_TOKEN" \
+##     grobid-trainer-hpc-crf.sif
+##
+## Notes:
+##   No --nv needed — CRF (Wapiti) training is CPU-only.
+##   The relay tunnel lets you control the job from outside the HPC network
+##   without opening any inbound ports on the compute node.
+##
+## ─────────────────────────────────────────────────────────────────────────────
+##
+## Build:
+##   podman build -f Dockerfile.trainer.hpc.crf \
+##     --build-arg GROBID_VERSION=0.8.3-SNAPSHOT \
+##     -t myuser/grobid-trainer-hpc-crf:latest .
+
+
+ARG GROBID_VERSION=0.8.3-SNAPSHOT
+
+
+# ── Stage 1: build trainer shadow JAR ─────────────────────────────────────────
+
+FROM eclipse-temurin:21.0.10_7-jdk AS builder
+
+USER root
+
+RUN apt-get update && \
+    apt-get -y upgrade && \
+    apt-get -y --no-install-recommends install unzip git && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/grobid-source
+
+COPY gradle/           ./gradle/
+COPY gradlew           ./
+COPY gradle.properties ./
+COPY build.gradle      ./
+COPY settings.gradle   ./
+
+COPY grobid-core/localLibs/ ./grobid-core/localLibs/
+
+RUN mkdir -p grobid-home grobid-service grobid-trainer
+
+RUN ./gradlew dependencies --no-daemon -q
+
+COPY grobid-home/    ./grobid-home/
+COPY grobid-core/    ./grobid-core/
+COPY grobid-trainer/ ./grobid-trainer/
+
+COPY .git/ ./.git
+
+ARG TARGETARCH
+
+RUN rm -rf grobid-home/pdf2xml
+RUN rm -rf grobid-home/pdfalto/win-* grobid-home/pdfalto/mac-64 grobid-home/pdfalto/mac_arm-64 grobid-home/pdfalto/lin-32
+RUN rm -rf grobid-home/lib/win-* grobid-home/lib/mac-64 grobid-home/lib/mac_arm-64 grobid-home/lib/lin-32
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+      rm -rf grobid-home/pdfalto/lin-64 grobid-home/lib/lin-64; \
+    else \
+      rm -rf grobid-home/pdfalto/lin_arm-64 grobid-home/lib/lin_arm-64; \
+    fi
+
+RUN ./gradlew :grobid-trainer:shadowJar --no-daemon && \
+    jar=$(ls grobid-trainer/build/libs/grobid-trainer-*-onejar.jar | tail -1) && \
+    cp "$jar" grobid-trainer/build/libs/trainer-onejar.jar
+
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+
+FROM eclipse-temurin:21.0.10_7-jre
+
+ENV LANG=C.UTF-8
+
+RUN apt-get update && \
+    apt-get -y --no-install-recommends install \
+        libxml2 libfontconfig curl software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get -y --no-install-recommends install \
+        python3.11 python3.11-venv && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+
+RUN pip3 install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    python-multipart \
+    websockets \
+    httpx
+
+ARG TARGETARCH
+
+ENV TINI_VERSION=v0.19.0
+ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-${TARGETARCH} /tini
+RUN chmod +x /tini
+
+WORKDIR /opt/grobid
+
+COPY --from=builder /opt/grobid-source/grobid-home ./grobid-home
+RUN chmod -R 755 /opt/grobid/grobid-home/pdfalto
+
+RUN mkdir -p /opt/grobid/grobid-trainer/build/libs \
+             /opt/grobid/grobid-trainer/resources/dataset \
+             /opt/grobid/grobid-trainer/resources/uploads
+COPY --from=builder \
+    /opt/grobid-source/grobid-trainer/build/libs/trainer-onejar.jar \
+    /opt/grobid/grobid-trainer/build/libs/grobid-trainer-docker-onejar.jar
+
+COPY grobid-home/scripts/trainer_service.py     /opt/grobid/grobid-home/scripts/
+COPY grobid-home/scripts/tunnel_client.py       /opt/grobid/grobid-home/scripts/
+COPY grobid-home/scripts/trainer-entrypoint.sh  /opt/grobid/
+RUN chmod +x /opt/grobid/trainer-entrypoint.sh
+
+ENV LD_LIBRARY_PATH=grobid-home/lib/lin-64:grobid-home/lib/lin_arm-64
+ENV JAVA_OPTS=-Xmx4g
+
+EXPOSE 8072
+
+ENTRYPOINT ["/tini", "-s", "--"]
+CMD ["/opt/grobid/trainer-entrypoint.sh"]
+
+ARG GROBID_VERSION
+LABEL \
+    org.label-schema.name="GROBID Trainer Service (HPC, CRF only)" \
+    org.label-schema.description="GROBID CRF/Wapiti trainer for HPC/Apptainer with WebSocket relay tunnel" \
+    org.label-schema.url="https://github.com/kermitt2/grobid" \
+    org.label-schema.version=${GROBID_VERSION}

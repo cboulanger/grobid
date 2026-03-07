@@ -93,13 +93,14 @@ Dockerfile.software
 Dockerfile.datastet
 .run
 
-# Nix flake: local Python venv created by flake.nix shellHook
-.venv
-# Nix flake lock — commit this for reproducible environments
-# flake.lock
-
 # code assistants
 .claude/
 
-# temporary models
+# environment or local files
+.venv
+.local
+.env
+.env.*
+
+# model backup and version files
 model.wapiti.*

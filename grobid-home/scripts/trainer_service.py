@@ -37,6 +37,7 @@ Notes on evaluation:
 """
 
 import argparse
+import asyncio
 import glob
 import io
 import json
@@ -47,6 +48,7 @@ import threading
 import time
 import uuid
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -281,6 +283,29 @@ def _start_job(cmd: List[str], **meta: Any) -> str:
 
 # ── FastAPI ────────────────────────────────────────────────────────────────────
 
+# Set by CLI args; read by the lifespan to decide whether to start the tunnel.
+_relay_url:   str = ""
+_relay_token: str = ""
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if _relay_url:
+        import sys
+        sys.path.insert(0, str(SCRIPT_DIR))
+        from tunnel_client import connect as _tunnel_connect
+        task = asyncio.create_task(
+            _tunnel_connect(_relay_url, token=_relay_token)
+        )
+        print(f"[trainer] Tunnel client started → {_relay_url}", flush=True)
+        try:
+            yield
+        finally:
+            task.cancel()
+    else:
+        yield
+
+
 app = FastAPI(
     title="GROBID Trainer Service",
     description=(
@@ -288,6 +313,7 @@ app = FastAPI(
         "Run inside `nix develop` (see flake.nix) for Metal GPU support."
     ),
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 VALID_MODELS = {
@@ -971,9 +997,14 @@ def health():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GROBID Trainer HTTP Service")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8072, help="Bind port (default: 8072)")
+    parser.add_argument("--host",        default="0.0.0.0",                        help="Bind address (default: 0.0.0.0)")
+    parser.add_argument("--port",        type=int, default=8072,                    help="Bind port (default: 8072)")
+    parser.add_argument("--relay",       default="",                                help="Relay WS URL to dial out to, e.g. wss://host/tunnel")
+    parser.add_argument("--relay-token", default=os.environ.get("RELAY_TOKEN", ""), help="Shared secret for relay auth (or set RELAY_TOKEN env var)")
     args = parser.parse_args()
+
+    _relay_url   = args.relay
+    _relay_token = args.relay_token
 
     jar = find_trainer_jar()
 
@@ -983,6 +1014,8 @@ if __name__ == "__main__":
     print(f"  java.lib.path: {build_java_lib_path()}")
     print(f"  Trainer JAR  : {jar or 'NOT FOUND — run ./gradlew :grobid-trainer:shadowJar --no-daemon'}")
     print(f"  API docs     : http://{args.host}:{args.port}/docs")
+    if _relay_url:
+        print(f"  Relay tunnel : {_relay_url}")
     print()
 
     uvicorn.run(app, host=args.host, port=args.port)

@@ -560,10 +560,13 @@ Some models support variants that are trained on specific document types. Pass t
 python grobid-home/scripts/trainer_service.py --help
 
 usage: trainer_service.py [-h] [--host HOST] [--port PORT]
+                          [--relay RELAY] [--relay-token RELAY_TOKEN]
 
 optional arguments:
-  --host HOST   Bind address (default: 0.0.0.0)
-  --port PORT   Bind port (default: 8072)
+  --host HOST               Bind address (default: 0.0.0.0)
+  --port PORT               Bind port (default: 8072)
+  --relay RELAY             Relay WS URL to dial out to, e.g. wss://host/tunnel
+  --relay-token RELAY_TOKEN Shared secret for relay auth (or set RELAY_TOKEN env var)
 ```
 
 ## Relation to Gradle training tasks
@@ -669,3 +672,149 @@ python -c "import tensorflow as tf; print(tf.config.list_physical_devices())"
 ```
 
 For CRF, you can increase parallelism by raising `nbThreads` in `grobid-home/config/grobid.yaml`.
+
+---
+
+## Remote operation via WebSocket tunnel (HPC / Apptainer)
+
+HPC clusters are typically not reachable from the internet — you cannot open a port into the job node. The WebSocket tunnel lets the container **dial out** to a relay server you control, which then proxies your HTTP requests (including live SSE streams) through that connection.
+
+```text
+[Your laptop / CI]         [Relay server — internet-accessible]         [HPC job node]
+
+  HTTP client ──────────► relay_server.py (port 8080) ◄── WS tunnel ── trainer_service.py
+  curl, browser, scripts       proxies requests inward                   (port 8072, local)
+```
+
+Three files are involved:
+
+| File | Runs on | Purpose |
+| ---- | ------- | ------- |
+| `grobid-home/scripts/relay_server.py` | Relay server | Accepts the tunnel; proxies HTTP through it |
+| `grobid-home/scripts/tunnel_client.py` | HPC container | Dials out to relay; forwards requests to local service |
+| `grobid-home/scripts/trainer_service.py` | HPC container | Existing trainer service; starts tunnel client if `--relay` is set |
+
+### 1. Start the relay server
+
+On any internet-accessible host (VPS, your workstation behind a port-forward, etc.):
+
+```bash
+pip install fastapi "uvicorn[standard]" websockets
+RELAY_TOKEN=mysecret python grobid-home/scripts/relay_server.py --port 8080
+```
+
+Or with explicit flags:
+
+```bash
+python grobid-home/scripts/relay_server.py --host 0.0.0.0 --port 8080 --token mysecret
+```
+
+The relay exposes:
+
+| Endpoint | Description |
+| -------- | ----------- |
+| `WS /tunnel` | Tunnel connection from the HPC container |
+| `GET /tunnel/status` | Check whether a container is currently connected |
+| `ANY /{path}` | Proxied to the trainer service through the tunnel |
+
+### 2. Start the trainer service with tunnel enabled
+
+Pass `--relay` (and optionally `--relay-token`) when starting the service inside the HPC container.  The tunnel client is launched automatically as a background task:
+
+```bash
+python grobid-home/scripts/trainer_service.py \
+    --relay wss://relay.your-domain.com/tunnel \
+    --relay-token mysecret
+```
+
+`RELAY_TOKEN` can be used instead of `--relay-token`:
+
+```bash
+export RELAY_TOKEN=mysecret
+python grobid-home/scripts/trainer_service.py --relay wss://relay.your-domain.com/tunnel
+```
+
+Once connected, all endpoints described in this document are accessible through the relay URL, including `GET /jobs/{job_id}/stream` (SSE streams correctly end-to-end).
+
+### 3. Use the relay as if it were the local service
+
+```bash
+# Health check via relay
+curl http://relay.your-domain.com:8080/health
+
+# Upload training data
+curl -X POST http://relay.your-domain.com:8080/upload/segmentation \
+  -F "file=@my-data.zip" -F "flavor=article/dh-law-footnotes"
+
+# Start training
+curl -X POST http://relay.your-domain.com:8080/train/header \
+  -H "Content-Type: application/json" \
+  -d '{"mode": 2, "epsilon": 0.0001}'
+
+# Stream live output (SSE — works transparently through the tunnel)
+curl -N http://relay.your-domain.com:8080/jobs/a3f1bc7e/stream
+```
+
+### Running as an Apptainer / Slurm job
+
+Pull the image once on the HPC login node (internet access required):
+
+```bash
+apptainer pull grobid-trainer.sif docker://you/grobid-trainer:latest
+```
+
+Paths inside the container follow the standard GROBID layout under `/opt/grobid/`.  Bind-mount your scratch directories there so training data and trained models survive across job runs:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=grobid-train
+#SBATCH --time=12:00:00
+#SBATCH --mem=16G
+
+apptainer run \
+  --nv \
+  --bind /scratch/$USER/dataset:/opt/grobid/grobid-trainer/resources/dataset \
+  --bind /scratch/$USER/models:/opt/grobid/grobid-home/models \
+  --env RELAY_URL=ws://relay.your-domain.com:8080/tunnel \
+  --env RELAY_TOKEN="$RELAY_TOKEN" \
+  grobid-trainer.sif
+```
+
+The container needs no inbound ports.  `RELAY_URL` and `RELAY_TOKEN` are read by the container entrypoint and forwarded to `trainer_service.py` automatically.
+
+### Tunnel CLI options
+
+**`trainer_service.py`** (HPC container side):
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--relay URL` | `""` | Relay WS URL. If omitted, no tunnel is started. |
+| `--relay-token SECRET` | `$RELAY_TOKEN` | Shared secret for authentication. |
+
+**`relay_server.py`** (relay side):
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--host ADDR` | `0.0.0.0` | Bind address. |
+| `--port PORT` | `8080` | Bind port. |
+| `--token SECRET` | `$RELAY_TOKEN` | If set, tunnel connections without a matching token are rejected. |
+
+### Running the tunnel client standalone
+
+`tunnel_client.py` can also be run independently of the trainer service — useful for testing connectivity or wrapping a service started by other means:
+
+```bash
+python grobid-home/scripts/tunnel_client.py \
+    --relay wss://relay.your-domain.com/tunnel \
+    --token mysecret \
+    --service http://localhost:8072
+```
+
+The client reconnects automatically with exponential back-off (up to 60 s) if the relay is temporarily unreachable.
+
+### Security notes
+
+- Set a strong `RELAY_TOKEN`.  Without it the tunnel endpoint is unauthenticated and anyone can connect.
+- Run the relay behind TLS (`wss://` not `ws://`) — use a reverse proxy such as nginx or Caddy, or pass `--ssl-certfile` / `--ssl-keyfile` to uvicorn directly.
+- Only one tunnel connection is accepted at a time.  A second container connecting with the correct token will replace the first.
+- The relay does not restrict which paths are forwarded.  Access control is left to the caller (network firewall, VPN, etc.).
