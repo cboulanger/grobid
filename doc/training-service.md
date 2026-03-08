@@ -1,18 +1,10 @@
-# GROBID Trainer HTTP Service for Apple Silicon
-
-!!! important "Platform-specific notes"
-    The service described here is experimental and has been tested only on Apple Silicon, specifically on a M4-Mac (32GB), with a dependency on
-    the [`nix` environment](use-nix-for-apple-silicon.md). In principle,
-    is should also work on other platforms but your mileage may vary.
+# GROBID Trainer HTTP Service 
 
 ## Goal
 
 The trainer service wraps GROBID model training and end-to-end evaluation in a REST API. Instead of running Gradle tasks directly from the command line, you can trigger and monitor training jobs over HTTP — useful for scripting, CI workflows, or remote operation.
 
 The service is implemented in [`grobid-home/scripts/trainer_service.py`](../grobid-home/scripts/trainer_service.py) and runs on port **8072** by default.
-
-!!! important "Prerequisites"
-    The trainer service must be run inside the Nix development environment to have access to Java 21, the correct native libraries, and (optionally) the Metal GPU for DeLFT models. See [Using the Nix environment](use-nix-environment.md) for setup instructions.
 
 ## Quick start
 
@@ -690,7 +682,7 @@ Three files are involved:
 
 | File | Runs on | Purpose |
 | ---- | ------- | ------- |
-| `grobid-home/scripts/relay_server.py` | Relay server | Accepts the tunnel; proxies HTTP through it |
+| `grobid-trainer/scripts/relay_server.py` | Relay server | Accepts the tunnel; proxies HTTP through it |
 | `grobid-home/scripts/tunnel_client.py` | HPC container | Dials out to relay; forwards requests to local service |
 | `grobid-home/scripts/trainer_service.py` | HPC container | Existing trainer service; starts tunnel client if `--relay` is set |
 
@@ -700,13 +692,13 @@ On any internet-accessible host (VPS, your workstation behind a port-forward, et
 
 ```bash
 pip install fastapi "uvicorn[standard]" websockets
-RELAY_TOKEN=mysecret python grobid-home/scripts/relay_server.py --port 8080
+RELAY_TOKEN=mysecret python grobid-trainer/scripts/relay_server.py --port 8080
 ```
 
 Or with explicit flags:
 
 ```bash
-python grobid-home/scripts/relay_server.py --host 0.0.0.0 --port 8080 --token mysecret
+python grobid-trainer/scripts/relay_server.py --host 0.0.0.0 --port 8080 --token mysecret
 ```
 
 The relay exposes:
@@ -760,6 +752,100 @@ After this, the HPC container connects to `wss://your-domain/tunnel` and all tra
 
 !!! note "Why two location blocks?"
     The WebSocket `/tunnel` endpoint needs HTTP/1.1 upgrade headers and a very long read timeout (the connection stays open for the entire training job). The `/relay/` prefix handles regular HTTP and SSE traffic; `proxy_buffering off` is essential here so SSE chunks are not held in nginx's buffer before being forwarded to the client.
+
+### 1c. Run the relay server as a system service (auto-start on boot)
+
+For production use, run the relay server as a systemd service so it restarts automatically on failure or reboot.
+
+Save the following as `/etc/systemd/system/grobid-relay.service` (adjust paths as needed):
+
+```ini
+[Unit]
+Description=GROBID Trainer Relay Server
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/env python3 /path/to/grobid-trainer/scripts/relay_server.py --port 8080
+Restart=always
+RestartSec=5
+EnvironmentFile=/path/to/.env   # file must contain: RELAY_TOKEN=secret
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable and start the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now grobid-relay
+sudo systemctl start grobid-relay
+```
+
+Check status and logs with:
+
+```bash
+sudo systemctl status grobid-relay
+sudo journalctl -u grobid-relay -f
+```
+
+### 1d. Block repeated unauthorized attempts with fail2ban
+
+The relay server logs every rejected tunnel connection to the systemd journal:
+
+```
+[relay] Unauthorized tunnel attempt from 1.2.3.4
+```
+
+**Behind nginx (recommended setup):** a rejected WebSocket upgrade appears as a `403` in the nginx access log. If you already have a fail2ban jail that watches nginx for `4xx` errors (e.g. `nginx-botsearch` or a custom `403` filter), those attempts are caught automatically — no additional configuration is needed. Check what is active with `sudo fail2ban-client status`.
+
+If no such jail exists yet, add one that covers all nginx `403`s (which protects the relay and everything else on the server):
+
+Create `/etc/fail2ban/filter.d/nginx-403.conf`:
+
+```ini
+[Definition]
+failregex = ^<HOST> -.*"(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|CONNECT) .* HTTP/.*" 403
+journalmatch = _SYSTEMD_UNIT=nginx.service
+```
+
+Create `/etc/fail2ban/jail.d/nginx-403.conf`:
+
+```ini
+[nginx-403]
+enabled  = true
+filter   = nginx-403
+backend  = systemd
+maxretry = 10
+findtime = 60
+bantime  = 3600
+```
+
+**Without nginx (raw port):** the relay logs the real client IP directly. Create `/etc/fail2ban/filter.d/grobid-relay.conf`:
+
+```ini
+[Definition]
+failregex = \[relay\] Unauthorized tunnel attempt from <HOST>
+journalmatch = _SYSTEMD_UNIT=grobid-relay.service
+```
+
+And `/etc/fail2ban/jail.d/grobid-relay.conf`:
+
+```ini
+[grobid-relay]
+enabled  = true
+filter   = grobid-relay
+backend  = systemd
+maxretry = 5
+findtime = 60
+bantime  = 3600
+```
+
+In either case, apply with:
+
+```bash
+sudo systemctl reload fail2ban
+```
 
 ### 2. Start the trainer service with tunnel enabled
 

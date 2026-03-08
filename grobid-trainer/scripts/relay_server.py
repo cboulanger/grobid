@@ -18,41 +18,31 @@ Endpoints:
     GET  /tunnel/status   Check tunnel liveness
     ANY  /{path:path}     Proxy to trainer service through the tunnel
 
-Reverse proxy (nginx):
-    When running behind nginx on a shared domain, add two location blocks to
-    your server block.  The WebSocket endpoint needs HTTP/1.1 upgrade headers
-    and a long read timeout; the HTTP proxy path needs buffering disabled for
-    SSE streaming.
+Running as a system service (auto-restart on failure / system boot):
+--------------------------------------------------------------------
+Linux (systemd) — save as /etc/systemd/system/grobid-relay.service:
 
-        # WebSocket tunnel — HPC container dials in here
-        location /tunnel {
-            proxy_pass http://127.0.0.1:8080;
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection "upgrade";
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_read_timeout 3600s;
-            proxy_send_timeout 3600s;
-        }
+```
+[Unit]
+Description=GROBID Trainer Relay Server
+After=network.target
 
-        # REST + SSE endpoints — clients access the trainer through here
-        location /relay/ {
-            proxy_pass http://127.0.0.1:8080/;   # trailing slash strips the prefix
-            proxy_http_version 1.1;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_buffering off;                  # required for SSE streaming
-            proxy_cache off;
-            proxy_read_timeout 3600s;
-            proxy_send_timeout 3600s;
-            client_max_body_size 500M;            # for large training data uploads
-        }
+[Service]
+ExecStart=/usr/bin/env python3 /path/to/relay_server.py --port 8080
+Restart=always
+RestartSec=5
+EnvironmentFile=/path/to/.env   # file must contain: RELAY_TOKEN=secret
 
-    After reload, HPC connects to:  wss://your-domain/tunnel
-    Clients access trainer API at:  https://your-domain/relay/
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable the service:
+```shell
+sudo systemctl daemon-reload
+sudo systemctl enable --now grobid-relay
+sudo systemctl start grobid-relay
+```
 """
 
 import asyncio
@@ -120,6 +110,7 @@ async def tunnel_endpoint(ws: WebSocket):
     # Auth: accept the connection first so we can send a close frame with a reason
     token = ws.query_params.get("token") or ws.headers.get("x-tunnel-token", "")
     if RELAY_TOKEN and token != RELAY_TOKEN:
+        print(f"[relay] Unauthorized tunnel attempt from {ws.client.host}", flush=True)
         await ws.close(code=4403, reason="Unauthorized")
         return
 
