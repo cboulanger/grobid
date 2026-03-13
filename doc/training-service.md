@@ -9,16 +9,13 @@ The service is implemented in [`grobid-home/scripts/trainer_service.py`](../grob
 ## Quick start
 
 ```bash
-# 1. Enter the Nix environment
-nix develop
-
-# 2. Build the trainer JAR (once, or after source changes)
+# 1. Build the trainer JAR (once, or after source changes)
 ./gradlew :grobid-trainer:shadowJar --no-daemon
 
-# 3. Start the service
+# 2. Start the service
 python grobid-home/scripts/trainer_service.py
 
-# 4. Verify it is running
+# 3. Verify it is running
 curl http://localhost:8072/health
 ```
 
