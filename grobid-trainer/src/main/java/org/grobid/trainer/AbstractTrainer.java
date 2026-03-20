@@ -124,14 +124,17 @@ public abstract class AbstractTrainer implements Trainer {
         if (outputModelPath != null) {
             // Write directly to the specified path — no rename dance
             trainer.train(getTemplatePath(), dataPath, finalModelPath, GrobidProperties.getWapitiNbThreads(), model, incremental);
+            System.out.println("Model for " + model + " created in " + finalModelPath.getAbsolutePath());
         } else {
             // Default atomic rename: write to .new, then rename
             final File tempModelPath = new File(finalModelPath.getAbsolutePath() + NEW_MODEL_EXT);
             trainer.train(getTemplatePath(), dataPath, tempModelPath, GrobidProperties.getWapitiNbThreads(), model, incremental);
             // if we are here, that means that training succeeded
             // rename model for CRF sequence labellers (not with DeLFT deep learning models)
-            if (GrobidProperties.getGrobidEngine(this.model) != GrobidCRFEngine.DELFT)
+            if (GrobidProperties.getGrobidEngine(this.model) != GrobidCRFEngine.DELFT){
                 renameModels(finalModelPath, tempModelPath);
+                System.out.println("Model for " + model + " replaced in " + finalModelPath.getAbsolutePath());   
+            }
         }
     }
 
